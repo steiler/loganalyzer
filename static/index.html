@@ -7,10 +7,28 @@
         body { font-family: monospace; margin: 0; padding: 10px; }
         #logs-container { display: inline-block; min-width: 100%; }
         #controls { position: sticky; top: 0; background-color: white; z-index: 10; padding: 10px 0; border-bottom: 1px solid #ccc; margin-bottom: 5px; }
-        .log-entry { padding: 2px 5px; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; border-left: 4px solid transparent; }
+        .log-entry { padding: 0; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; display: flex; align-items: stretch; }
         .log-entry:hover { background-color: #f0f0f0; }
+        .log-entry-gutter {
+            width: 8px;
+            min-width: 8px;
+            cursor: pointer;
+            margin-right: 6px;
+        }
+        .log-entry-gutter:hover { background-color: #ccc; }
+        .log-entry-gutter.interesting { background-color: #64b5f6; }
+        .log-entry-gutter.interesting:hover { background-color: #42a5f5; }
+        
+        .log-content-wrapper { 
+            padding: 2px 0; 
+            flex-grow: 1; 
+            display: flex; 
+            align-items: center; 
+            overflow: hidden; 
+        }
         .log-entry.search-match { background-color: #ffff99; }
         .log-entry.active-entry { background-color: #ffe0b2; outline: 1px solid #ffcc80; }
+        .log-entry.marked-entry { background-color: #d0f0c0; }
         body.modal-open { overflow: hidden; }
         /* Modal styles */
         .modal { display: none; position: fixed; z-index: 20; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.4); }
@@ -25,9 +43,7 @@
         .json-null { color: magenta; font-weight: bold; }
         
         /* Clean indicator for Expandable/Partial content */
-        .drill-downable { 
-             border-left-color: #64b5f6; /* Subtle blue strip */
-        }
+        /* Border color logic moved to .log-entry-gutter.interesting */
         
         .drill-downable::after {
             content: " ⋯";
@@ -130,6 +146,7 @@
                 <input type="text" id="modal-search" placeholder="Find in modal..." size="30">
                 <button id="modal-prev" title="Previous match">▲</button>
                 <button id="modal-next" title="Next match">▼</button>
+                <button id="modal-copy" title="Copy JSON" style="margin-left: 10px;">Copy</button>
                 <span id="modal-stats" style="font-size: 0.9em; color: #666;"></span>
                 <span class="close">&times;</span>
             </div>
@@ -141,7 +158,8 @@
         const interestingMsgs = [
             "writeback synctree", "populated tree", "got SetResponse from SBI",
             "received request", "gnmi request", "adding intent to tree",
-            "deletes owner", "updates owner", "sync content", "synctree after sync apply"
+            "deletes owner", "updates owner", "sync content", "synctree after sync apply",
+            "received netconf response", "deviation tree"
         ];
 
         let isLoading = false;
@@ -342,7 +360,7 @@
                 let isInteresting = false;
                 if (log.msg && interestingMsgs.includes(log.msg)) {
                     div.classList.add('highlight');
-                    div.classList.add('drill-downable');
+                    // Ellipsis indicator should attach to content, not the flex container
                     isInteresting = true;
                 }
                 
@@ -351,17 +369,38 @@
                     div.classList.add('search-match');
                 }
 
+                // Gutter (acts as the clickable strip)
+                const gutter = document.createElement('div');
+                gutter.className = 'log-entry-gutter';
+                if (isInteresting) {
+                    gutter.classList.add('interesting');
+                }
+                gutter.title = 'Click to mark/highlight';
+                gutter.onclick = (e) => {
+                    e.stopPropagation();
+                    div.classList.toggle('marked-entry');
+                };
+                div.appendChild(gutter);
+
+                // Content
+                const content = document.createElement('span');
+                content.className = 'log-content-wrapper';
                 // Display whole log line
                 if (log.raw) {
-                    div.textContent = log.raw;
+                    content.textContent = log.raw;
                 } else {
                     const orderedLog = reorderLogKeys(log);
-                    div.textContent = JSON.stringify(orderedLog);
+                    content.textContent = JSON.stringify(orderedLog);
                 }
+                // Attach ellipsis indicator directly after text content
+                if (isInteresting) {
+                    content.classList.add('drill-downable');
+                }
+                div.appendChild(content);
                 
                 let clickTimeout = null;
 
-                div.onclick = () => {
+                div.onclick = (e) => {
                    const selection = window.getSelection();
                    if (selection.toString().length > 0) {
                        return;
@@ -942,8 +981,41 @@
         }
         document.addEventListener('keydown', function(event) {
             if (event.key === "Escape") {
-                closeModal();
+                if (modal.style.display === "block") {
+                    closeModal();
+                } else {
+                    clearSearch();
+                }
             }
+        });
+
+        // Overview shortcut: fill selected text into main search (Ctrl+Shift+F or Alt+S)
+        document.addEventListener('keydown', function(event) {
+            const modalEl = document.getElementById('myModal');
+            const modalVisible = modalEl && modalEl.style.display === 'block';
+            // Act only in overview view
+            if (modalVisible) return;
+
+            const key = String(event.key || '').toLowerCase();
+            const isShortcut = (event.ctrlKey && event.shiftKey && key === 'f') || (event.altKey && key === 's');
+            if (!isShortcut) return;
+
+            // Don't interfere while typing in inputs/textareas or content-editable elements
+            const active = document.activeElement;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+
+            const selectionText = window.getSelection().toString().trim();
+            if (!selectionText) return;
+
+            const searchInput = document.getElementById('search-input');
+            if (!searchInput) return;
+
+            searchInput.value = selectionText;
+            searchInput.dispatchEvent(new Event('input'));
+            searchInput.focus();
+
+            event.preventDefault();
+            event.stopPropagation();
         });
         
         // Modal Search Listeners
@@ -965,6 +1037,62 @@
                 }
             }
         });
+
+        document.getElementById('modal-copy').addEventListener('click', async () => {
+            if (!currentModalData) return;
+            try {
+                // Generate pretty text from flatNodes (visual representation)
+                const text = getPrettyText();
+                await navigator.clipboard.writeText(text);
+                const btn = document.getElementById('modal-copy');
+                const orig = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = orig, 1500);
+            } catch (err) {
+                console.error('Failed to copy!', err);
+                alert('Failed to copy to clipboard. Ensure you are using localhost or HTTPS.');
+            }
+        });
+        
+        function getPrettyText() {
+             if (flatNodes.length === 0 && currentModalData) {
+                 flattenData(currentModalData);
+             }
+             if (flatNodes.length === 0) return "";
+
+             return flatNodes.map(node => {
+                const indent = '  '.repeat(node.depth);
+                let line = indent;
+                
+                if (node.key !== undefined) {
+                    line += `"${node.key}": `;
+                }
+                
+                if (node.type === 'scalar') {
+                    if (node.value === null) line += 'null';
+                    else if (typeof node.value === 'boolean') line += node.value;
+                    else if (typeof node.value === 'number') line += node.value;
+                    else line += `"${node.value}"`;
+                } else if (node.type === 'scalar_multiline_start') {
+                    line += `"${node.value}`;
+                } else if (node.type === 'scalar_multiline_mid') {
+                    line += node.value;
+                } else if (node.type === 'scalar_multiline_end') {
+                    line += `${node.value}"`;
+                } else if (node.type === 'start_obj') {
+                    line += node.count === 0 ? '{}' : '{';
+                } else if (node.type === 'start_arr') {
+                    line += node.count === 0 ? '[]' : '[';
+                } else if (node.type === 'end_obj') {
+                    line += '}';
+                } else if (node.type === 'end_arr') {
+                    line += ']';
+                }
+                
+                if (node.comma) line += ',';
+                return line;
+             }).join('\n');
+        }
 
         init();
     </script>
