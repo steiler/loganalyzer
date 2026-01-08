@@ -1,0 +1,218 @@
+package main
+
+import (
+	"bufio"
+	"encoding/base64"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+
+	sdcpb "github.com/sdcio/sdc-protos/sdcpb"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+)
+
+type LogLine map[string]interface{}
+
+type LogMeta struct {
+	DatastoreName string `json:"datastore-name"`
+}
+
+var (
+	rawLines []string
+	metaData []LogMeta
+	logFile  string
+)
+
+func main() {
+	flag.StringVar(&logFile, "file", "", "Path to the log file")
+	flag.Parse()
+
+	if logFile == "" {
+		if len(os.Args) > 1 {
+			if os.Args[1][0] != '-' {
+				logFile = os.Args[1]
+			}
+		}
+	}
+
+	if logFile == "" {
+		log.Fatal("Please provide a log file via -file flag or as argument")
+	}
+
+	// Pre-load file
+	if err := loadFile(logFile); err != nil {
+		log.Fatal(err)
+	}
+
+	http.Handle("/", http.FileServer(http.Dir("./static")))
+	http.HandleFunc("/api/logs", handleLogs)
+	http.HandleFunc("/api/decode", handleDecode)
+	http.HandleFunc("/api/datastores", handleDatastores)
+
+	fmt.Printf("Starting server on :8080 with log file: %s (%d lines)\n", logFile, len(rawLines))
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func loadFile(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReader(file)
+
+	// Robustly skip the first line, handling potentially huge lines
+	for {
+		_, isPrefix, err := reader.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if !isPrefix {
+			break
+		}
+	}
+
+	scanner := bufio.NewScanner(reader)
+	// 5MB buffer
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 5*1024*1024)
+
+	rawLines = make([]string, 0, 10000)
+	metaData = make([]LogMeta, 0, 10000)
+
+	for scanner.Scan() {
+		text := scanner.Text()
+		// Copy text to ensure it's safe from scanner buffer reuse?
+		// Scanner.Text() returns a string which is immutable, so it should be fine allocation-wise?
+		// Actually Text() allocates a new string.
+
+		rawLines = append(rawLines, text)
+
+		// Parse just metadata for filtering
+		var meta LogMeta
+		// We ignore errors here for speed/robustness, if it's not JSON it will have empty datastore
+		_ = json.Unmarshal([]byte(text), &meta)
+		metaData = append(metaData, meta)
+	}
+	return scanner.Err()
+}
+
+func handleDatastores(w http.ResponseWriter, r *http.Request) {
+	set := make(map[string]bool)
+	for _, m := range metaData {
+		if m.DatastoreName != "" {
+			set[m.DatastoreName] = true
+		}
+	}
+
+	list := make([]string, 0, len(set))
+	for k := range set {
+		list = append(list, k)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	// Query params: offset, limit, datastore
+	offset := 0
+	limit := 100
+	datastore := r.URL.Query().Get("datastore")
+
+	if o := r.URL.Query().Get("offset"); o != "" {
+		fmt.Sscanf(o, "%d", &offset)
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	var result []LogLine
+
+	// Filtering and Paginating
+	// If datastore is empty, we just slice rawLines
+	// If datastore is present, we must scan metaData to find matching indices
+
+	count := 0
+	skipped := 0
+
+	for i, meta := range metaData {
+		if datastore != "" && meta.DatastoreName != datastore {
+			continue
+		}
+
+		// Valid match
+		if skipped < offset {
+			skipped++
+			continue
+		}
+
+		if count >= limit {
+			break
+		}
+
+		// Parse full line
+		var line LogLine
+		if err := json.Unmarshal([]byte(rawLines[i]), &line); err == nil {
+			result = append(result, line)
+		} else {
+			result = append(result, LogLine{"raw": rawLines[i]})
+		}
+		count++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+type DecodeRequest struct {
+	Value string `json:"value"`
+}
+
+func handleDecode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req DecodeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	decodedBytes, err := base64.StdEncoding.DecodeString(req.Value)
+	if err != nil {
+		http.Error(w, "Failed to base64 decode: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	tv := &sdcpb.TypedValue{}
+	if err := proto.Unmarshal(decodedBytes, tv); err != nil {
+		http.Error(w, "Failed to unmarshal as TypedValue: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	marshaller := protojson.MarshalOptions{Multiline: true, EmitUnpopulated: false}
+	jsonBytes, err := marshaller.Marshal(tv)
+	if err != nil {
+		http.Error(w, "Failed to marshal to JSON: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonBytes)
+}

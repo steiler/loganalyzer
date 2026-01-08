@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Log Analyzer</title>
+    <style>
+        body { font-family: monospace; }
+        .log-entry { padding: 2px 5px; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; }
+        .log-entry:hover { background-color: #f0f0f0; }
+        .highlight { background-color: #e6f3ff; }
+        /* Modal styles */
+        .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }
+        .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 90%; max-height: 90%; overflow-y: scroll; }
+        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
+        .close:hover,
+        .close:focus { color: black; text-decoration: none; cursor: pointer; }
+        .json-key { color: brown; }
+        .json-value { color: navy; }
+        .json-string { color: olive; }
+        .json-boolean { color: blue; font-weight: bold; }
+        .json-null { color: magenta; font-weight: bold; }
+        .drill-downable { font-weight: bold; color: blue; }
+        pre { white-space: pre-wrap; word-wrap: break-word; }
+    </style>
+</head>
+<body>
+    <h1>Log Analyzer</h1>
+    <div id="controls">
+        <label for="datastore-filter">Filter by Datastore:</label>
+        <select id="datastore-filter">
+            <option value="">All</option>
+        </select>
+    </div>
+    <div id="logs-container">Loading...</div>
+
+    <div id="myModal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <pre id="modal-text"></pre>
+        </div>
+    </div>
+
+    <script>
+        const interestingMsgs = [
+            "writeback synctree", "populated tree", "got SetResponse from SBI",
+            "received request", "gnmi request", "adding intent to tree",
+            "deletes owner", "updates owner"
+        ];
+
+        let isLoading = false;
+        let currentOffset = 0;
+        const initialLimit = 100;
+        const limit = 50;
+        let hasMore = true;
+        let currentFilter = "";
+
+        async function fetchLogs(reset = false) {
+            if (isLoading) return;
+            if (reset) {
+                currentOffset = 0;
+                hasMore = true;
+                document.getElementById('logs-container').innerHTML = '';
+            }
+            if (!hasMore) return;
+
+            isLoading = true;
+            const fetchLimit = currentOffset === 0 ? initialLimit : limit;
+            
+            try {
+                const response = await fetch(`/api/logs?offset=${currentOffset}&limit=${fetchLimit}&datastore=${encodeURIComponent(currentFilter)}`);
+                const newLogs = await response.json();
+                
+                if (newLogs.length < fetchLimit) {
+                    hasMore = false;
+                }
+                
+                // We should just render the new logs
+                renderLogs(newLogs);
+                
+                currentOffset += newLogs.length;
+
+                // If we haven't filled the screen yet, fetch more
+                if (document.body.scrollHeight <= window.innerHeight && hasMore) {
+                     isLoading = false; // Reset to allow recursion
+                     await fetchLogs();
+                }
+
+            } catch (e) {
+                console.error(e);
+            } finally {
+                isLoading = false;
+            }
+        }
+
+        async function init() {
+            await fetchDatastores();
+            await fetchLogs(true);
+            
+            // Infinite scroll
+            window.onscroll = function() {
+                if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+                    fetchLogs();
+                }
+            };
+        }
+
+        async function fetchDatastores() {
+            const response = await fetch('/api/datastores');
+            const datastores = await response.json();
+            const filterSelect = document.getElementById('datastore-filter');
+            
+            // Clear existing options except All
+            while (filterSelect.options.length > 1) {
+                filterSelect.remove(1);
+            }
+
+            datastores.forEach(ds => {
+                const option = document.createElement('option');
+                option.value = ds;
+                option.textContent = ds;
+                filterSelect.appendChild(option);
+            });
+            
+            filterSelect.onchange = (e) => {
+                currentFilter = e.target.value;
+                fetchLogs(true);
+            };
+        }
+
+        function reorderLogKeys(log) {
+            if (log.raw) return log;
+
+            const priorityKeys = ["time", "msg", "datastore-name", "logger", "transaction-id"];
+            const excludedKeys = ["content", "raw-request", "updates", "deletes", "raw-response", "explicit-deletes", "updates-owner", "deletes-owner", "tree"];
+            const newLog = {};
+
+            // Add priority keys first if they exist
+            priorityKeys.forEach(key => {
+                if (log.hasOwnProperty(key)) {
+                    newLog[key] = log[key];
+                }
+            });
+
+            // Add remaining keys
+            Object.keys(log).forEach(key => {
+                if (!priorityKeys.includes(key) && !excludedKeys.includes(key)) {
+                    newLog[key] = log[key];
+                }
+            });
+
+            return newLog;
+        }
+
+        function renderLogs(logsToRender) {
+            const container = document.getElementById('logs-container');
+            // Remove 'Loading...' if present
+            if (container.textContent === 'Loading...' && logsToRender.length > 0) {
+                 container.innerHTML = '';
+            }
+            
+            logsToRender.forEach((log, index) => {
+                const div = document.createElement('div');
+                div.className = 'log-entry';
+                let isInteresting = false;
+                if (log.msg && interestingMsgs.includes(log.msg)) {
+                    div.classList.add('highlight');
+                    div.classList.add('drill-downable');
+                    isInteresting = true;
+                }
+                
+                // Display whole log line
+                if (log.raw) {
+                    div.textContent = log.raw;
+                } else {
+                    const orderedLog = reorderLogKeys(log);
+                    div.textContent = JSON.stringify(orderedLog);
+                }
+                
+                div.onclick = () => {
+                   if (isInteresting || true) { // Make all clickable for inspection
+                       showDetails(log);
+                   }
+                };
+                container.appendChild(div);
+            });
+        }
+
+        async function showDetails(logData) {
+            const modal = document.getElementById("myModal");
+            const modalText = document.getElementById("modal-text");
+            modal.style.display = "block";
+            modalText.textContent = "Processing...";
+            
+            // Deep clone to modify
+            const data = JSON.parse(JSON.stringify(logData));
+            
+            // Process nested JSON strings
+            processNestedJson(data);
+            
+            // Decode leafVariants
+            await processLeafVariants(data);
+
+            modalText.innerHTML = syntaxHighlight(data);
+        }
+
+        function syntaxHighlight(json) {
+            if (typeof json != 'string') {
+                 json = JSON.stringify(json, undefined, 2);
+            }
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                var cls = 'json-value';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                        // Replace escaped newlines with actual newlines for pretty display
+                        match = match.replace(/\\n/g, '\n');
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        function processNestedJson(obj) {
+            for (const key in obj) {
+                if (typeof obj[key] === 'string') {
+                    if ((obj[key].startsWith('{') || obj[key].startsWith('[')) && (key === 'content' || key === 'raw-request' || key === 'updates' || key === 'deletes' || key === 'raw-response' || key === 'explicit-deletes')) {
+                         try {
+                             obj[key] = JSON.parse(obj[key]);
+                             // Recursively process the new object
+                             processNestedJson(obj[key]);
+                         } catch (e) {
+                             // Not JSON or parse error, ignore
+                         }
+                    }
+                } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+                    processNestedJson(obj[key]);
+                }
+            }
+        }
+
+        async function processLeafVariants(obj) {
+             if (typeof obj !== 'object' || obj === null) return;
+
+             // If we find leafVariant key
+             if (obj.hasOwnProperty('leafVariant')) {
+                 if (typeof obj.leafVariant === 'string') {
+                     try {
+                        const decoded = await decodeValue(obj.leafVariant);
+                        // Add decoded property nearby
+                        obj['leafVariant_decoded'] = decoded;
+                     } catch (e) {
+                        obj['leafVariant_error'] = e.message;
+                     }
+                 }
+             }
+
+             // Recursively check children
+             // But careful not to loop if we modified obj above? 
+             // We added leafVariant_decoded, which is object, so we might recurse into it.
+             // But TypedValue shouldn't have nested leafVariants in this context usually?
+             // To be safe, iterate over KEYS that existed before?
+             // Or just iterate over all keys.
+             
+             // Using Object.keys to avoid iterating over newly added properties if they are added during iteration? 
+             // Actually, for...in or Object.keys might behave differently.
+             // To be safe:
+             const keys = Object.keys(obj);
+             for (const key of keys) {
+                 if (key === 'leafVariant_decoded') continue; // Don't process what we just added
+                 if (typeof obj[key] === 'object') {
+                     await processLeafVariants(obj[key]);
+                 }
+             }
+        }
+
+        async function decodeValue(base64Str) {
+            const res = await fetch('/api/decode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value: base64Str })
+            });
+            if (!res.ok) throw new Error(await res.text());
+            return await res.json();
+        }
+
+        // Modal close logic
+        const modal = document.getElementById("myModal");
+        const span = document.getElementsByClassName("close")[0];
+        span.onclick = function() { modal.style.display = "none"; }
+        window.onclick = function(event) {
+            if (event.target == modal) { modal.style.display = "none"; }
+        }
+
+        init();
+    </script>
+</body>
+</html>
