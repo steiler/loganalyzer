@@ -120,6 +120,7 @@
 
         <label for="search-input" style="margin-left: 20px;">Search:</label>
         <input type="text" id="search-input" placeholder="Type to highlight...">
+        <button onclick="clearSearch()">Clear</button>
     </div>
     <div id="logs-container">Loading...</div>
 
@@ -140,7 +141,7 @@
         const interestingMsgs = [
             "writeback synctree", "populated tree", "got SetResponse from SBI",
             "received request", "gnmi request", "adding intent to tree",
-            "deletes owner", "updates owner"
+            "deletes owner", "updates owner", "sync content", "synctree after sync apply"
         ];
 
         let isLoading = false;
@@ -274,6 +275,12 @@
             }
         }
 
+        function clearSearch() {
+            const searchInput = document.getElementById('search-input');
+            searchInput.value = '';
+            searchInput.dispatchEvent(new Event('input'));
+        }
+
         function applySearchHighlight() {
             const container = document.getElementById('logs-container');
             const entries = container.getElementsByClassName('log-entry');
@@ -352,13 +359,39 @@
                     div.textContent = JSON.stringify(orderedLog);
                 }
                 
-                div.onclick = () => {
-                   document.querySelectorAll('.log-entry.active-entry').forEach(el => el.classList.remove('active-entry'));
-                   div.classList.add('active-entry');
+                let clickTimeout = null;
 
-                   if (isInteresting || true) { // Make all clickable for inspection
-                       showDetails(log);
+                div.onclick = () => {
+                   const selection = window.getSelection();
+                   if (selection.toString().length > 0) {
+                       return;
                    }
+
+                   if (clickTimeout) clearTimeout(clickTimeout);
+                   clickTimeout = setTimeout(() => {
+                       document.querySelectorAll('.log-entry.active-entry').forEach(el => el.classList.remove('active-entry'));
+                       div.classList.add('active-entry');
+
+                       if (isInteresting || true) { // Make all clickable for inspection
+                           showDetails(log);
+                       }
+                   }, 250);
+                };
+
+                div.ondblclick = (e) => {
+                    if (clickTimeout) clearTimeout(clickTimeout);
+
+                    const selection = window.getSelection();
+                    const text = selection.toString().trim();
+                    if (text) {
+                        const searchInput = document.getElementById('search-input');
+                        searchInput.value = text;
+                        // Trigger input event to update highlight
+                        searchInput.dispatchEvent(new Event('input'));
+                        
+                        // Prevent propagation
+                        e.stopPropagation();
+                    }
                 };
                 fragment.appendChild(div);
             });
