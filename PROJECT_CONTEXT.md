@@ -26,6 +26,7 @@
 *   **Recursive Parsing:** Specific string fields containing JSON (e.g., `content`, `updates`) are automatically parsed and expanded into nested JSON objects.
 *   **XML Pretty-Printing:** Fields containing XML strings (specifically `response`) are detected, formatted with indentation, and rendered across multiple lines for readability. XML responses are excluded from the main overview list to reduce clutter.
 *   **Protobuf Decoding:** Fields named `leafVariant` that contain base64-encoded strings are aggregated and sent to the backend in a single batch request (`/api/decode/batch`) to be decoded into human-readable JSON.
+*   **jsonVal Decoding:** Fields named `jsonVal` (and variants `json_val`, `json-val`) that contain base64-encoded JSON are decoded on the frontend; if the decoded content is valid JSON it is parsed and rendered as structured data under `jsonVal_decoded`, otherwise shown as a UTF-8 string. This ensures pretty-printed display in the modal.
 
 ### 3. Filtering and Navigation
 *   **Datastore Filtering:** A dropdown allows filtering logs by `datastore-name`.
@@ -42,6 +43,7 @@
 *   **Formatting:** Newlines in JSON strings (specifically in `msg`, `content`, or XML responses) are respected and rendered on separate lines in the virtualized view.
 *   **Modal Search:** In-modal search with next/prev navigation, match counters, and highlighting. Enter/Shift+Enter navigate matches.
 *   **Collapse/Expand:** Modal content supports collapsing and expanding nested objects and arrays via gutter +/- buttons for easier navigation of large structures.
+*   **Horizontal Scroll:** The modal preserves long-line formatting and enables horizontal scrolling for overflow content to avoid line wrapping and clipping.
 
 ## Technical Stack
 
@@ -74,6 +76,7 @@
 
 ### 3. Decoding Strategy
 *   **Server-Side Decoding:** Protobuf decoding is offloaded to a backend endpoint (`/api/decode` and `/api/decode/batch`) to leverage the existing Go Protobuf definitions (`sdc-protos`) rather than rewriting proto logic in JavaScript.
+*   **Client-Side Decoding (jsonVal):** Base64 JSON in `jsonVal` fields is decoded in the browser for immediacy and to avoid server calls; decoded objects render via the modal's virtualized pretty view.
 
 ## In-Scope vs Out-of-Scope
 

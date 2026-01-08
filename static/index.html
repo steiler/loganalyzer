@@ -82,7 +82,7 @@
         
         .log-content { 
             white-space: pre; 
-            overflow: hidden;
+            overflow: visible;
             padding-left: 8px; 
             flex-grow: 1;
             padding-top: 0;
@@ -116,6 +116,7 @@
             top: 0;
             left: 0;
             right: 0;
+            min-width: max-content; /* allow horizontal overflow for long lines */
         }
     </style>
 </head>
@@ -520,6 +521,10 @@
                 
                 processNestedJson(data);
 
+                if (statusSpan) statusSpan.textContent = "(Decoding jsonVal fields)";
+                await new Promise(r => setTimeout(r, 10)); // Yield
+                processJsonValFields(data);
+
                 if (statusSpan) statusSpan.textContent = "(Decoding leaf variants)";
                 await new Promise(r => setTimeout(r, 10)); // Yield
                 
@@ -894,6 +899,51 @@
                 pad += indent;
             });
             return formatted.trim();
+        }
+
+        // Decode base64 (standard or URL-safe) to UTF-8 string
+        function decodeBase64Utf8(b64) {
+            try {
+                let s = String(b64 || '');
+                s = s.replace(/-/g, '+').replace(/_/g, '/');
+                while (s.length % 4 !== 0) s += '=';
+                const binary = atob(s);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                if (typeof TextDecoder !== 'undefined') {
+                    return new TextDecoder('utf-8').decode(bytes);
+                }
+                // Fallback best-effort
+                return decodeURIComponent(escape(binary));
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Decode base64-encoded JSON found in jsonVal fields and attach as jsonVal_decoded
+        function processJsonValFields(obj) {
+            function traverse(o) {
+                if (typeof o !== 'object' || o === null) return;
+                for (const key in o) {
+                    const val = o[key];
+                    // Support common casings: jsonVal, json_val, json-val
+                    const isJsonValKey = (key === 'jsonVal' || key === 'json_val' || key === 'json-val');
+                    if (isJsonValKey && typeof val === 'string' && !('jsonVal_decoded' in o)) {
+                        const decoded = decodeBase64Utf8(val);
+                        if (decoded !== null) {
+                            let parsed = null;
+                            try {
+                                parsed = JSON.parse(decoded);
+                            } catch (e) {
+                                parsed = decoded; // Not JSON, keep as string
+                            }
+                            o['jsonVal_decoded'] = parsed;
+                        }
+                    }
+                    if (key !== 'jsonVal_decoded') traverse(val);
+                }
+            }
+            traverse(obj);
         }
 
         async function processLeafVariants(obj) {
