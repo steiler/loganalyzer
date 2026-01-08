@@ -4,38 +4,129 @@
     <meta charset="UTF-8">
     <title>Log Analyzer</title>
     <style>
-        body { font-family: monospace; }
-        .log-entry { padding: 2px 5px; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; }
+        body { font-family: monospace; margin: 0; padding: 10px; }
+        #logs-container { display: inline-block; min-width: 100%; }
+        #controls { position: sticky; top: 0; background-color: white; z-index: 10; padding: 10px 0; border-bottom: 1px solid #ccc; margin-bottom: 5px; }
+        .log-entry { padding: 2px 5px; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; border-left: 4px solid transparent; }
         .log-entry:hover { background-color: #f0f0f0; }
-        .highlight { background-color: #e6f3ff; }
+        .log-entry.search-match { background-color: #ffff99; }
+        .log-entry.active-entry { background-color: #ffe0b2; outline: 1px solid #ffcc80; }
+        body.modal-open { overflow: hidden; }
         /* Modal styles */
-        .modal { display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.4); }
-        .modal-content { background-color: #fefefe; margin: 5% auto; padding: 20px; border: 1px solid #888; width: 90%; max-height: 90%; overflow-y: scroll; }
-        .close { color: #aaa; float: right; font-size: 28px; font-weight: bold; }
-        .close:hover,
-        .close:focus { color: black; text-decoration: none; cursor: pointer; }
+        .modal { display: none; position: fixed; z-index: 20; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.4); }
+        .modal-content { background-color: #fefefe; margin: 2vh auto; width: 90%; height: 96vh; display: flex; flex-direction: column; position: relative; border: 1px solid #888; box-sizing: border-box; border-radius: 4px; overflow: hidden; }
+        .modal-header { padding: 10px 20px; border-bottom: 1px solid #ddd; background: #fefefe; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+        .close { color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; margin-left: auto; }
+        .close:hover, .close:focus { color: black; text-decoration: none; }
         .json-key { color: brown; }
         .json-value { color: navy; }
         .json-string { color: olive; }
         .json-boolean { color: blue; font-weight: bold; }
         .json-null { color: magenta; font-weight: bold; }
-        .drill-downable { font-weight: bold; color: blue; }
-        pre { white-space: pre-wrap; word-wrap: break-word; }
+        
+        /* Clean indicator for Expandable/Partial content */
+        .drill-downable { 
+             border-left-color: #64b5f6; /* Subtle blue strip */
+        }
+        
+        .drill-downable::after {
+            content: " ⋯";
+            color: #999;
+            font-weight: bold;
+            padding-left: 5px;
+        }
+
+        .modal-match { background-color: yellow; color: black; }
+        .modal-match.active { background-color: orange; outline: 2px solid red; }
+        pre { white-space: pre-wrap; word-wrap: break-word; margin-top: 0; }
+        #modal-text { overflow-y: auto; flex-grow: 1; padding: 0; margin: 0; }
+        
+        .log-row { display: flex; font-family: monospace; height: 20px; line-height: 20px; }
+        .log-row:hover { background-color: #fafafa; }
+        .log-gutter { 
+            width: 30px; 
+            min-width: 30px;
+            background: #f5f5f5; 
+            border-right: 1px solid #e0e0e0;
+            text-align: center;
+            color: #999;
+            flex-shrink: 0;
+            user-select: none;
+            padding-top: 0;
+        }
+        .gutter-btn { 
+            cursor: pointer; 
+            font-weight: bold; 
+            color: #444; 
+            display: inline-block;
+            width: 100%;
+            line-height: 20px;
+        }
+        .gutter-btn:hover { color: #000; background-color: #e0e0e0; }
+        
+        .log-content { 
+            white-space: pre; 
+            overflow: hidden;
+            padding-left: 8px; 
+            flex-grow: 1;
+            padding-top: 0;
+        }
+
+        .hidden-row { display: none !important; }
+
+        .collapsible-placeholder { 
+            color: #999; 
+            cursor: pointer;
+            padding: 0 5px;
+            background: #f5f5f5;
+            border-radius: 2px;
+            user-select: none;
+        }
+        
+        /* Virtual scroll container styles */
+        #modal-text {
+            overflow-y: auto;
+            overflow-x: auto;
+            flex-grow: 1;
+            padding: 0;
+            margin: 0;
+            position: relative;
+        }
+        #virtual-spacer {
+            width: 1px;
+        }
+        #virtual-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+        }
     </style>
 </head>
 <body>
-    <h1>Log Analyzer</h1>
+    <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
+        <img src="https://docs.sdcio.dev/assets/logos/SDC-transparent-withname-100x133.png" alt="SDC Logo" style="height: 50px;">
+        <h1 style="margin: 0;">Log Analyzer</h1>
+    </div>
     <div id="controls">
         <label for="datastore-filter">Filter by Datastore:</label>
         <select id="datastore-filter">
             <option value="">All</option>
         </select>
+        <label for="search-input" style="margin-left: 20px;">Search:</label>
+        <input type="text" id="search-input" placeholder="Type to highlight...">
     </div>
     <div id="logs-container">Loading...</div>
 
     <div id="myModal" class="modal">
         <div class="modal-content">
-            <span class="close">&times;</span>
+            <div class="modal-header">
+                <input type="text" id="modal-search" placeholder="Find in modal..." size="30">
+                <button id="modal-prev" title="Previous match">▲</button>
+                <button id="modal-next" title="Next match">▼</button>
+                <span id="modal-stats" style="font-size: 0.9em; color: #666;"></span>
+                <span class="close">&times;</span>
+            </div>
             <pre id="modal-text"></pre>
         </div>
     </div>
@@ -53,6 +144,12 @@
         const limit = 50;
         let hasMore = true;
         let currentFilter = "";
+        let currentSearchTerm = "";
+        
+        // Modal state
+        let currentModalData = null;
+        let modalSearchMatches = [];
+        let modalSearchIndex = -1;
 
         async function fetchLogs(reset = false) {
             if (isLoading) return;
@@ -94,6 +191,12 @@
 
         async function init() {
             await fetchDatastores();
+            
+            document.getElementById('search-input').addEventListener('input', (e) => {
+                currentSearchTerm = e.target.value.toLowerCase();
+                applySearchHighlight();
+            });
+
             await fetchLogs(true);
             
             // Infinite scroll
@@ -127,11 +230,30 @@
             };
         }
 
+        function applySearchHighlight() {
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            
+            for (let div of entries) {
+                if (!currentSearchTerm) {
+                    div.classList.remove('search-match');
+                    continue;
+                }
+                
+                // Search in the full log data attached to the element
+                if (div.logData && JSON.stringify(div.logData).toLowerCase().includes(currentSearchTerm)) {
+                     div.classList.add('search-match');
+                } else {
+                     div.classList.remove('search-match');
+                }
+            }
+        }
+
         function reorderLogKeys(log) {
             if (log.raw) return log;
 
             const priorityKeys = ["time", "msg", "datastore-name", "logger", "transaction-id"];
-            const excludedKeys = ["content", "raw-request", "updates", "deletes", "raw-response", "explicit-deletes", "updates-owner", "deletes-owner", "tree"];
+            const excludedKeys = ["content", "raw-request", "updates", "deletes", "raw-response", "explicit-deletes", "updates-owner", "deletes-owner", "tree", "data"];
             const newLog = {};
 
             // Add priority keys first if they exist
@@ -161,6 +283,8 @@
             logsToRender.forEach((log, index) => {
                 const div = document.createElement('div');
                 div.className = 'log-entry';
+                div.logData = log; // Attach data for search
+
                 let isInteresting = false;
                 if (log.msg && interestingMsgs.includes(log.msg)) {
                     div.classList.add('highlight');
@@ -168,6 +292,11 @@
                     isInteresting = true;
                 }
                 
+                // Check search immediately for new items
+                if (currentSearchTerm && JSON.stringify(log).toLowerCase().includes(currentSearchTerm)) {
+                    div.classList.add('search-match');
+                }
+
                 // Display whole log line
                 if (log.raw) {
                     div.textContent = log.raw;
@@ -177,6 +306,9 @@
                 }
                 
                 div.onclick = () => {
+                   document.querySelectorAll('.log-entry.active-entry').forEach(el => el.classList.remove('active-entry'));
+                   div.classList.add('active-entry');
+
                    if (isInteresting || true) { // Make all clickable for inspection
                        showDetails(log);
                    }
@@ -185,59 +317,358 @@
             });
         }
 
+        // Virtual Scroll State (Global)
+        let flatNodes = [];
+        let visibleIndices = []; 
+        let visibleMatchIndices = [];
+        let matchMap = new Map();
+        let collapsedNodeIds = new Set();
+        const ROW_HEIGHT = 20;
+        
         async function showDetails(logData) {
             const modal = document.getElementById("myModal");
             const modalText = document.getElementById("modal-text");
+            
+            // 1. Show modal immediately with loading state
             modal.style.display = "block";
-            modalText.textContent = "Processing...";
+            document.body.classList.add('modal-open');
+            modalText.innerHTML = '<div style="padding: 20px; font-size: 1.2em; color: #666;">Processing comprehensive log data... <span id="proc-status"></span></div>';
             
-            // Deep clone to modify
-            const data = JSON.parse(JSON.stringify(logData));
-            
-            // Process nested JSON strings
-            processNestedJson(data);
-            
-            // Decode leafVariants
-            await processLeafVariants(data);
+            // Yield to UI to allow render
+            await new Promise(r => setTimeout(r, 10));
 
-            modalText.innerHTML = syntaxHighlight(data);
+            try {
+                // Clear previous search state
+                document.getElementById('modal-search').value = "";
+                document.getElementById('modal-stats').textContent = "";
+                modalSearchMatches = [];
+                modalSearchIndex = -1;
+
+                // Reset virtualization state
+                flatNodes = [];
+                collapsedNodeIds = new Set();
+                visibleIndices = [];
+                visibleMatchIndices = [];
+                matchMap = new Map();
+                
+                // Deep clone and process
+                const data = JSON.parse(JSON.stringify(logData));
+                
+                const statusSpan = document.getElementById('proc-status');
+                if (statusSpan) statusSpan.textContent = "(Parsing nested JSON)";
+                await new Promise(r => setTimeout(r, 10)); // Yield
+                
+                processNestedJson(data);
+
+                if (statusSpan) statusSpan.textContent = "(Decoding leaf variants)";
+                await new Promise(r => setTimeout(r, 10)); // Yield
+                
+                await processLeafVariants(data);
+                
+                if (statusSpan) statusSpan.textContent = "(Building view)";
+                await new Promise(r => setTimeout(r, 10)); // Yield
+
+                currentModalData = data;
+                
+                // Initialize container structure for virtual scroll
+                modalText.innerHTML = '<div id="virtual-spacer"></div><div id="virtual-content"></div>';
+                
+                // Initial render
+                renderModalContent();
+
+            } catch (e) {
+                console.error(e);
+                modalText.innerHTML = `<div style="padding: 20px; color: red;">Error processing log: ${e.message}</div>`;
+            }
         }
 
-        function syntaxHighlight(json) {
-            if (typeof json != 'string') {
-                 json = JSON.stringify(json, undefined, 2);
+        function renderModalContent() {
+            if (!currentModalData) return;
+            const term = document.getElementById('modal-search').value;
+            const modalText = document.getElementById("modal-text");
+            
+            // Flatten if needed
+            if (flatNodes.length === 0) {
+                 flattenData(currentModalData);
             }
-            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
-                var cls = 'json-value';
-                if (/^"/.test(match)) {
-                    if (/:$/.test(match)) {
-                        cls = 'json-key';
-                    } else {
-                        cls = 'json-string';
-                        // Replace escaped newlines with actual newlines for pretty display
-                        match = match.replace(/\\n/g, '\n');
-                    }
-                } else if (/true|false/.test(match)) {
-                    cls = 'json-boolean';
-                } else if (/null/.test(match)) {
-                    cls = 'json-null';
+            
+            // Calculate Matches
+            calculateMatches(term);
+            
+            // Calculate Layout
+            recalcVisibleRows();
+            
+            // Setup Scroll
+            modalText.onscroll = onModalScroll;
+            onModalScroll(); 
+            
+            // Update Stats
+            updateModalStats();
+            
+            if (term && visibleMatchIndices.length > 0) {
+                 navigateToMatch(0);
+            }
+        }
+
+        function onModalScroll() {
+            const modalText = document.getElementById("modal-text");
+            const spacer = document.getElementById("virtual-spacer");
+            const content = document.getElementById("virtual-content");
+            if (!spacer || !content) return; 
+
+            const scrollTop = modalText.scrollTop;
+            const containerHeight = modalText.clientHeight;
+            
+            // Update spacer
+            spacer.style.height = (visibleIndices.length * ROW_HEIGHT) + 'px';
+            
+            // Calculate slice
+            const startIndex = Math.floor(scrollTop / ROW_HEIGHT);
+            const buffer = 10;
+            const effectiveSortStart = Math.max(0, startIndex - buffer);
+            const count = Math.ceil(containerHeight / ROW_HEIGHT) + 2 * buffer;
+            const endIndex = Math.min(visibleIndices.length, effectiveSortStart + count);
+            
+            // Render slice
+            let html = '';
+            const term = document.getElementById('modal-search').value;
+            let regex = null;
+            if (term) regex = new RegExp(`(${escapeRegExp(term)})`, 'gi');
+
+            for (let i = effectiveSortStart; i < endIndex; i++) {
+                const nodeIdx = visibleIndices[i];
+                if (nodeIdx < flatNodes.length) {
+                    const node = flatNodes[nodeIdx];
+                    html += renderRow(node, regex, i);
                 }
-                return '<span class="' + cls + '">' + match + '</span>';
+            }
+            
+            content.innerHTML = html;
+            content.style.transform = `translateY(${effectiveSortStart * ROW_HEIGHT}px)`;
+        }
+
+        function renderRow(node, regex, visualIndex) {
+            const indent = '  '.repeat(node.depth);
+            let content = '';
+            
+            // Helper for HL
+            const hl = (txt) => {
+                if (!regex) return escapeHtml(txt);
+                return escapeHtml(txt).replace(regex, '<span class="modal-match">$1</span>');
+            };
+            const escapeHtml = (str) => String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+            // Common parts
+            let keyPart = '';
+            if (node.key !== undefined) {
+                keyPart = `<span class="json-key">"${hl(node.key)}"</span>: `;
+            }
+            let comma = node.comma ? ',' : '';
+
+            // Render based on type
+            if (node.type === 'scalar') {
+                let valHtml = '';
+                if (node.value === null) valHtml = '<span class="json-null">null</span>';
+                else if (typeof node.value === 'boolean') valHtml = `<span class="json-boolean">${node.value}</span>`;
+                else if (typeof node.value === 'number') valHtml = `<span class="json-value">${node.value}</span>`;
+                else valHtml = `<span class="json-string">"${hl(node.value)}"</span>`;
+                
+                content = `${keyPart}${valHtml}${comma}`;
+            } else if (node.type === 'start_obj') {
+                const isCollapsed = collapsedNodeIds.has(node.id);
+                const placeholder = isCollapsed ? `<span id="cp-${node.id}" class="collapsible-placeholder" style="display:inline" onclick="toggleCollapse(${node.id})">...}</span>` : '';
+                const brace = '{' + placeholder;
+                content = `${keyPart}${brace}`;
+                if (!isCollapsed && node.count === 0) content += '}'; // Empty object
+            } else if (node.type === 'start_arr') {
+                const isCollapsed = collapsedNodeIds.has(node.id);
+                const placeholder = isCollapsed ? `<span id="cp-${node.id}" class="collapsible-placeholder" style="display:inline" onclick="toggleCollapse(${node.id})">...]</span>` : '';
+                const bracket = '[' + placeholder;
+                content = `${keyPart}${bracket}`;
+                if (!isCollapsed && node.count === 0) content += ']'; // Empty array
+            } else if (node.type === 'end_obj') {
+                content = `}${comma}`;
+            } else if (node.type === 'end_arr') {
+                content = `]${comma}`;
+            }
+
+            // Gutter
+            let gutter = '';
+            if (node.type === 'start_obj' || node.type === 'start_arr') {
+                 if (node.count > 0) {
+                     const isCollapsed = collapsedNodeIds.has(node.id);
+                     const sign = isCollapsed ? '+' : '-';
+                     gutter = `<span class="gutter-btn" onclick="toggleCollapse(${node.id})">${sign}</span>`;
+                 }
+            }
+
+            // Active Row Highlight
+            let extraClass = '';
+            if (modalSearchIndex !== -1 && visibleMatchIndices[modalSearchIndex] === visualIndex) {
+                 extraClass = ' active-match-row';
+            }
+
+            return `<div class="log-row${extraClass}" style="height:${ROW_HEIGHT}px">
+                    <div class="log-gutter">${gutter}</div>
+                    <div class="log-content">${indent}${content}</div>
+                </div>`;
+        }
+
+        function flattenData(data) {
+            flatNodes = [];
+            let idCounter = 0;
+
+            function recurse(obj, depth, key, isLast) {
+                const comma = !isLast;
+
+                if (obj === null || typeof obj !== 'object') {
+                    flatNodes.push({ type: 'scalar', depth, key, value: obj, comma });
+                    return;
+                }
+
+                if (Array.isArray(obj)) {
+                    if (obj.length === 0) {
+                         flatNodes.push({ type: 'start_arr', depth, key, count: 0, comma });
+                         return;
+                    }
+                    const id = ++idCounter;
+                    const index = flatNodes.length;
+                    // Store comma here for collapsed state
+                    flatNodes.push({ type: 'start_arr', depth, key, id, count: obj.length, comma: comma }); 
+                    
+                    for (let i = 0; i < obj.length; i++) {
+                        recurse(obj[i], depth + 1, undefined, i === obj.length - 1);
+                    }
+                    
+                    flatNodes[index].skipTo = flatNodes.length; // Index of end node
+                    flatNodes.push({ type: 'end_arr', depth, parentId: id, comma });
+                    return;
+                }
+
+                const keys = Object.keys(obj);
+                if (keys.length === 0) {
+                     flatNodes.push({ type: 'start_obj', depth, key, count: 0, comma });
+                     return;
+                }
+
+                const id = ++idCounter;
+                const index = flatNodes.length;
+                flatNodes.push({ type: 'start_obj', depth, key, id, count: keys.length, comma: comma });
+                
+                for (let i = 0; i < keys.length; i++) {
+                    recurse(obj[keys[i]], depth + 1, keys[i], i === keys.length - 1);
+                }
+
+                flatNodes[index].skipTo = flatNodes.length;
+                flatNodes.push({ type: 'end_obj', depth, parentId: id, comma });
+            }
+
+            recurse(data, 0, undefined, true);
+        }
+
+        function calculateMatches(term) {
+            matchMap.clear();
+            if (!term) return;
+            const lowerTerm = term.toLowerCase(); 
+            
+            flatNodes.forEach((node, idx) => {
+                let text = '';
+                if (node.key) text += node.key;
+                if (node.value !== undefined && node.value !== null) text += String(node.value);
+                
+                if (text.toLowerCase().includes(lowerTerm)) {
+                    matchMap.set(idx, true);
+                }
             });
+        }
+
+        function recalcVisibleRows() {
+            visibleIndices = [];
+            let i = 0;
+            while (i < flatNodes.length) {
+                const node = flatNodes[i];
+                visibleIndices.push(i);
+                
+                // If collapsed, skip to text node
+                if ((node.type === 'start_obj' || node.type === 'start_arr') && collapsedNodeIds.has(node.id) && node.count > 0) {
+                     // We skip the children AND the end node
+                     if (node.skipTo) {
+                         i = node.skipTo;
+                     }
+                } 
+                i++;
+            }
+            recalcMatchIndices();
+        }
+
+        function recalcMatchIndices() {
+            visibleMatchIndices = [];
+            visibleIndices.forEach((nodeIdx, visualIndex) => {
+                if (matchMap.has(nodeIdx)) {
+                    visibleMatchIndices.push(visualIndex);
+                }
+            });
+        }
+
+        function toggleCollapse(id) {
+            if (collapsedNodeIds.has(id)) {
+                collapsedNodeIds.delete(id);
+            } else {
+                collapsedNodeIds.add(id);
+            }
+            recalcVisibleRows();
+            onModalScroll();
+            
+            const term = document.getElementById('modal-search').value;
+            if (term) {
+                 recalcMatchIndices();
+                 updateModalStats();
+            }
+        }
+
+        function navigateToMatch(index) {
+            if (visibleMatchIndices.length === 0) return;
+             
+             // Wrap index
+            if (index >= visibleMatchIndices.length) index = 0;
+            if (index < 0) index = visibleMatchIndices.length - 1;
+            
+            modalSearchIndex = index;
+            
+            // Scroll to it
+            const targetVisualIdx = visibleMatchIndices[modalSearchIndex];
+            // We need to calculate scroll position
+            const modalText = document.getElementById("modal-text");
+            // Approximate position
+            modalText.scrollTop = targetVisualIdx * ROW_HEIGHT - (modalText.clientHeight / 2);
+            
+            updateModalStats();
+        }
+
+        function updateModalStats() {
+            const stats = document.getElementById('modal-stats');
+            const term = document.getElementById('modal-search').value;
+            if (visibleMatchIndices.length > 0) {
+                stats.textContent = `${modalSearchIndex + 1} of ${visibleMatchIndices.length}`;
+            } else if (term) {
+                stats.textContent = "0 matches";
+            } else {
+                stats.textContent = "";
+            }
+        }
+        
+        function escapeRegExp(string) {
+            return string.replace(/[.*+?^!:${}()|[\]\\]/g, '\\$&');
         }
 
         function processNestedJson(obj) {
             for (const key in obj) {
                 if (typeof obj[key] === 'string') {
-                    if ((obj[key].startsWith('{') || obj[key].startsWith('[')) && (key === 'content' || key === 'raw-request' || key === 'updates' || key === 'deletes' || key === 'raw-response' || key === 'explicit-deletes')) {
+                    if ((obj[key].startsWith('{') || obj[key].startsWith('[')) && (key === 'content' || key === 'raw-request' || key === 'updates' || key === 'deletes' || key === 'raw-response' || key === 'explicit-deletes' || key === 'data')) {
                          try {
                              obj[key] = JSON.parse(obj[key]);
-                             // Recursively process the new object
                              processNestedJson(obj[key]);
-                         } catch (e) {
-                             // Not JSON or parse error, ignore
-                         }
+                         } catch (e) {}
                     }
                 } else if (typeof obj[key] === 'object' && obj[key] !== null) {
                     processNestedJson(obj[key]);
@@ -246,37 +677,64 @@
         }
 
         async function processLeafVariants(obj) {
-             if (typeof obj !== 'object' || obj === null) return;
-
-             // If we find leafVariant key
-             if (obj.hasOwnProperty('leafVariant')) {
-                 if (typeof obj.leafVariant === 'string') {
-                     try {
-                        const decoded = await decodeValue(obj.leafVariant);
-                        // Add decoded property nearby
-                        obj['leafVariant_decoded'] = decoded;
-                     } catch (e) {
-                        obj['leafVariant_error'] = e.message;
+             const targets = [];
+             
+             // Recursively traverse and collect targets
+             function traverse(o) {
+                 if (typeof o !== 'object' || o === null) return;
+                 
+                 // Check for leafVariant
+                 if (o.hasOwnProperty('leafVariant') && typeof o.leafVariant === 'string') {
+                     targets.push(o);
+                 }
+                 
+                 // Recurse children
+                 for (const key in o) {
+                     // Skip what we just added or non-objects
+                     if (key !== 'leafVariant_decoded' && key !== 'leafVariant_error') {
+                         traverse(o[key]);
                      }
                  }
              }
 
-             // Recursively check children
-             // But careful not to loop if we modified obj above? 
-             // We added leafVariant_decoded, which is object, so we might recurse into it.
-             // But TypedValue shouldn't have nested leafVariants in this context usually?
-             // To be safe, iterate over KEYS that existed before?
-             // Or just iterate over all keys.
+             traverse(obj);
              
-             // Using Object.keys to avoid iterating over newly added properties if they are added during iteration? 
-             // Actually, for...in or Object.keys might behave differently.
-             // To be safe:
-             const keys = Object.keys(obj);
-             for (const key of keys) {
-                 if (key === 'leafVariant_decoded') continue; // Don't process what we just added
-                 if (typeof obj[key] === 'object') {
-                     await processLeafVariants(obj[key]);
+             if (targets.length === 0) return;
+
+             try {
+                 const values = targets.map(t => t.leafVariant);
+                 
+                 // Send batch request
+                 const res = await fetch('/api/decode/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(values)
+                 });
+                 
+                 if (!res.ok) throw new Error(await res.text());
+                 
+                 const results = await res.json();
+                 
+                 // Apply results back to objects
+                 for (let i = 0; i < targets.length; i++) {
+                     const result = results[i];
+                     const target = targets[i];
+                     
+                     // Check if result indicates error (our backend logic returns {error: "..."} on failure)
+                     // But valid result is also an object. 
+                     // Valid TypedValue JSON usually has keys like 'string_val', 'int_val', etc.
+                     // Error object has 'error' key.
+                     if (result && result.error) {
+                         target['leafVariant_error'] = result.error;
+                     } else {
+                         target['leafVariant_decoded'] = result;
+                     }
                  }
+                 
+             } catch (e) {
+                 console.error("Batch decode failed", e);
+                 // Fallback error marking
+                 targets.forEach(t => t['leafVariant_error'] = "Batch failed: " + e.message);
              }
         }
 
@@ -293,10 +751,39 @@
         // Modal close logic
         const modal = document.getElementById("myModal");
         const span = document.getElementsByClassName("close")[0];
-        span.onclick = function() { modal.style.display = "none"; }
-        window.onclick = function(event) {
-            if (event.target == modal) { modal.style.display = "none"; }
+        const closeModal = function() { 
+            modal.style.display = "none";
+            document.body.classList.remove('modal-open');
         }
+        span.onclick = closeModal;
+        window.onclick = function(event) {
+            if (event.target == modal) { closeModal(); }
+        }
+        document.addEventListener('keydown', function(event) {
+            if (event.key === "Escape") {
+                closeModal();
+            }
+        });
+        
+        // Modal Search Listeners
+        document.getElementById('modal-search').addEventListener('input', () => {
+             renderModalContent();
+        });
+        document.getElementById('modal-next').addEventListener('click', () => {
+             navigateToMatch(modalSearchIndex + 1);
+        });
+        document.getElementById('modal-prev').addEventListener('click', () => {
+             navigateToMatch(modalSearchIndex - 1);
+        });
+        document.getElementById('modal-search').addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                if (e.shiftKey) {
+                    navigateToMatch(modalSearchIndex - 1);
+                } else {
+                    navigateToMatch(modalSearchIndex + 1);
+                }
+            }
+        });
 
         init();
     </script>

@@ -52,6 +52,7 @@ func main() {
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 	http.HandleFunc("/api/logs", handleLogs)
 	http.HandleFunc("/api/decode", handleDecode)
+	http.HandleFunc("/api/decode/batch", handleDecodeBatch)
 	http.HandleFunc("/api/datastores", handleDatastores)
 
 	fmt.Printf("Starting server on :8080 with log file: %s (%d lines)\n", logFile, len(rawLines))
@@ -215,4 +216,59 @@ func handleDecode(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonBytes)
+}
+
+func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var values []string
+	if err := json.NewDecoder(r.Body).Decode(&values); err != nil {
+		http.Error(w, "Invalid request body (expected array of strings)", http.StatusBadRequest)
+		return
+	}
+
+	results := make([]interface{}, len(values))
+	// Reuse the marshaller
+	marshaller := protojson.MarshalOptions{Multiline: true, EmitUnpopulated: false}
+
+	for i, v := range values {
+		// Prepare a result object for this item
+		res := make(map[string]interface{})
+
+		decodedBytes, err := base64.StdEncoding.DecodeString(v)
+		if err != nil {
+			res["error"] = "Base64 error: " + err.Error()
+			results[i] = res
+			continue
+		}
+
+		tv := &sdcpb.TypedValue{}
+		if err := proto.Unmarshal(decodedBytes, tv); err != nil {
+			res["error"] = "Proto error: " + err.Error()
+			results[i] = res
+			continue
+		}
+
+		jsonBytes, err := marshaller.Marshal(tv)
+		if err != nil {
+			res["error"] = "JSON error: " + err.Error()
+			results[i] = res
+			continue
+		}
+
+		// Unmarshal back to interface{} to embed in the larger JSON response properly
+		var jsonVal interface{}
+		if err := json.Unmarshal(jsonBytes, &jsonVal); err != nil {
+			res["error"] = "Re-unmarshal error: " + err.Error() // Should not happen
+			results[i] = res
+		} else {
+			results[i] = jsonVal
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(results)
 }

@@ -41,13 +41,17 @@
 *   **Memory Efficiency:** The backend reads the log file into memory as raw strings (`[]string`) plus a lightweight metadata slice for filtering. It does *not* unmarshal the entire JSON content of every line at startup. This reduces memory pressure and GC overhead.
 *   **On-Demand Parsing:** JSON unmarshalling occurs only for the specific slice of lines requested by the frontend pagination.
 *   **Lazy Loading:** The frontend uses infinite scrolling (triggered by scroll position) to fetch batches of logs (initially 100, then 50 at a time).
+*   **Frontend Virtualization (Modal):** The detail modal uses a **Flattened Virtual Scroll** strategy.
+    *   Instead of recursive DOM creation (which blocks the main thread on large trees), the nested JSON is flattened into a linear array of lightweight descriptor objects (`flatNodes`).
+    *   A virtual window renders only the usage nodes currently visible in the viewport (plus a small buffer).
+*   **Batch Processing:** To solve network latency issues when decoding hundreds of `leafVariant` fields in large trees, the frontend aggregates all encoded values and sends a single **Batch Decode** request (`/api/decode/batch`) to the backend.
 
 ### 2. Robustness
 *   **Corruption Handling:** The file loader explicitly skips the first line relative to the file reader to prevent `bufio.Scanner: token too long` errors or JSON parse errors caused by log rotation or truncation.
 *   **Recursive Parsing:** The frontend attempts to parse nested JSON strings but fails gracefully (leaving the string as-is) if parsing fails.
 
 ### 3. Decoding Strategy
-*   **Server-Side Decoding:** Protobuf decoding is offloaded to a backend endpoint (`/api/decode`) to leverage the existing Go Protobuf definitions (`sdc-protos`) rather than rewriting proto logic in JavaScript.
+*   **Server-Side Decoding:** Protobuf decoding is offloaded to a backend endpoint (`/api/decode` and `/api/decode/batch`) to leverage the existing Go Protobuf definitions (`sdc-protos`) rather than rewriting proto logic in JavaScript.
 
 ## In-Scope vs Out-of-Scope
 
@@ -55,6 +59,7 @@
 *   Reading local log files.
 *   Decoding specific field patterns (`leafVariant`).
 *   Performance for files up to ~200MB+.
+*   **Frontend Search:** Basic client-side search (filter text) for loaded logs and modal content. Regex support was removed to simplify the UX.
 
 **Out-of-Scope:**
 *   Real-time log tailing/streaming (file is loaded once at startup).
@@ -65,5 +70,8 @@
 ## Open Questions / TODOs / Known Tradeoffs
 
 *   **Memory Usage:** For extremely large files (GB+), the current `[]string` in-memory approach will exhaust RAM. A future improvement would be to index file offsets and seek on disk instead of loading all lines.
-*   **Search:** Text search across the message body is not implemented; currently only filtering by `datastore-name` is supported.
 *   **Hardcoded Fields:** The list of fields to recurse into (`content`, `updates`, etc.) and exclude from the main view is hardcoded in the frontend. Configuration could be externalized.
+
+
+Treat this file as the authoritative source of truth.
+When we make decisions that change scope, requirements, architecture, or assumptions, explicitly tell me that PROJECT_CONTEXT.md should be updated and provide the updated version.
