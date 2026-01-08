@@ -13,24 +13,32 @@
 ### 1. Log Visualization
 *   **Scrollable View:** Display logs in a dense, non-wrapping list.
 *   **Column Ordering:** Priority fields must be valid and shown first: `time`, `msg`, `datastore-name`, `logger`, `transaction-id`.
-*   **Field Exclusion:** Lengthy fields (`content`, `raw-request`, `updates`, `deletes`, `raw-response`, `explicit-deletes`, `updates-owner`, `deletes-owner`, `tree`) are excluded from the main table view to reduce visual noise and scrolling.
+*   **Field Exclusion:** Lengthy fields (`content`, `raw-request`, `updates`, `deletes`, `raw-response`, `response`, `explicit-deletes`, `updates-owner`, `deletes-owner`, `tree`, `data`) are excluded from the main table view to reduce visual noise and scrolling.
 
 ### 2. Drill-Down Capabilities
 *   **Modal Inspection:** Clicking a log line opens a modal with the full, detailed log entry.
 *   **Recursive Parsing:** Specific string fields containing JSON (e.g., `content`, `updates`) are automatically parsed and expanded into nested JSON objects.
-*   **Protobuf Decoding:** Fields named `leafVariant` that contain base64-encoded strings are sent to the backend to be decoded into human-readable JSON using `sdc-protos`.
+*   **XML Pretty-Printing:** Fields containing XML strings (specifically `response`) are detected, formatted with indentation, and rendered across multiple lines for readability.
+*   **Protobuf Decoding:** Fields named `leafVariant` that contain base64-encoded strings are aggregated and sent to the backend in a single batch request (`/api/decode/batch`) to be decoded into human-readable JSON.
 
 ### 3. Filtering and Navigation
 *   **Datastore Filtering:** A dropdown allows filtering logs by `datastore-name`.
-*   **Infinite Scrolling:** The frontend loads data in chunks to handle large datasets effectively.
+*   **Time Jump:** Users can jump to a specific timestamp (supporting `HH:MM:SS` and `H:MM` formats). The system locates the nearest log entry and updates the view.
+*   **Bidirectional Infinite Scrolling:** The frontend supports scrolling both down (to load newer logs) and up (to load older logs). When jumping to a specific time, previous logs are pre-fetched to allow immediate upward scrolling.
 
 ### 4. Presentation
 *   **Syntax Highlighting:** JSON in the modal is pretty-printed and syntax-highlighted (keys, strings, booleans, nulls).
-*   **Formatting:** Newlines in JSON strings (specifically in `msg` or `content`) are rendered effectively in the modal.
+*   **Formatting:** Newlines in JSON strings (specifically in `msg`, `content`, or XML responses) are respected and rendered on separate lines in the virtualized view.
 
 ## Technical Stack
 
 *   **Backend:** Go (Golang)
+    *   **Endpoints:** 
+        *   `/api/logs`: Fetch log slices.
+        *   `/api/offset`: Find file offset by timestamp.
+        *   `/api/decode`: Single value decoding (legacy).
+        *   `/api/decode/batch`: Batch decoding of multiple values.
+        *   `/api/datastores`: List available datastores.
     *   **Dependencies:** `github.com/sdcio/sdc-protos` (for `sdcpb` decoding), `google.golang.org/protobuf`.
 *   **Frontend:** Vanilla HTML, CSS, JavaScript (no external framework dependencies).
 *   **Transport:** REST / JSON.
@@ -38,13 +46,14 @@
 ## Key Architectural Decisions & Rationale
 
 ### 1. Performance Strategy for Large Files
-*   **Memory Efficiency:** The backend reads the log file into memory as raw strings (`[]string`) plus a lightweight metadata slice for filtering. It does *not* unmarshal the entire JSON content of every line at startup. This reduces memory pressure and GC overhead.
+*   **Memory Efficiency:** The backend reads the log file into memory as raw strings (`[]string`) plus a lightweight metadata slice (`LogMeta` containing `Time` and `DatastoreName`) for filtering and seeking.
 *   **On-Demand Parsing:** JSON unmarshalling occurs only for the specific slice of lines requested by the frontend pagination.
-*   **Lazy Loading:** The frontend uses infinite scrolling (triggered by scroll position) to fetch batches of logs (initially 100, then 50 at a time).
+*   **Lazy Loading:** The frontend uses bidirectional infinite scrolling to fetch batches of logs.
 *   **Frontend Virtualization (Modal):** The detail modal uses a **Flattened Virtual Scroll** strategy.
     *   Instead of recursive DOM creation (which blocks the main thread on large trees), the nested JSON is flattened into a linear array of lightweight descriptor objects (`flatNodes`).
-    *   A virtual window renders only the usage nodes currently visible in the viewport (plus a small buffer).
-*   **Batch Processing:** To solve network latency issues when decoding hundreds of `leafVariant` fields in large trees, the frontend aggregates all encoded values and sends a single **Batch Decode** request (`/api/decode/batch`) to the backend.
+    *   A virtual window renders only the usage nodes currently visible in the viewport.
+    *   Large multiline strings (like XML dumps) are split into individual virtual rows to ensure consistent row heights and proper rendering.
+*   **Batch Processing:** To solve network latency issues when decoding hundreds of `leafVariant` fields in large trees, the frontend aggregates all encoded values and sends a single **Batch Decode** request to the backend.
 
 ### 2. Robustness
 *   **Corruption Handling:** The file loader explicitly skips the first line relative to the file reader to prevent `bufio.Scanner: token too long` errors or JSON parse errors caused by log rotation or truncation.

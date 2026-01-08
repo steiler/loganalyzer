@@ -113,6 +113,11 @@
         <select id="datastore-filter">
             <option value="">All</option>
         </select>
+        
+        <label for="time-input" style="margin-left: 20px;">Jump to Time:</label>
+        <input type="text" id="time-input" placeholder="HH:MM:SS" size="10" onkeydown="if(event.key === 'Enter') jumpToTime()">
+        <button onclick="jumpToTime()">Go</button>
+
         <label for="search-input" style="margin-left: 20px;">Search:</label>
         <input type="text" id="search-input" placeholder="Type to highlight...">
     </div>
@@ -140,6 +145,7 @@
 
         let isLoading = false;
         let currentOffset = 0;
+        let topOffset = 0;
         const initialLimit = 100;
         const limit = 50;
         let hasMore = true;
@@ -155,6 +161,7 @@
             if (isLoading) return;
             if (reset) {
                 currentOffset = 0;
+                topOffset = 0;
                 hasMore = true;
                 document.getElementById('logs-container').innerHTML = '';
             }
@@ -201,8 +208,13 @@
             
             // Infinite scroll
             window.onscroll = function() {
+                // Bottom
                 if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
                     fetchLogs();
+                }
+                // Top
+                if (window.scrollY < 100 && topOffset > 0 && !isLoading) {
+                    fetchPrevious();
                 }
             };
         }
@@ -229,6 +241,38 @@
                 fetchLogs(true);
             };
         }
+        
+        async function jumpToTime() {
+            const timeVal = document.getElementById('time-input').value.trim();
+            if (!timeVal) return;
+            
+            isLoading = true;
+            try {
+                const res = await fetch(`/api/offset?time=${encodeURIComponent(timeVal)}&datastore=${encodeURIComponent(currentFilter)}`);
+                const data = await res.json();
+                
+                // Set offsets manually
+                currentOffset = data.offset;
+                topOffset = data.offset;
+                hasMore = true;
+                
+                // Clear container
+                document.getElementById('logs-container').innerHTML = '';
+                
+                // Release lock temporarily so fetchLogs can start
+                isLoading = false; 
+                await fetchLogs();
+                
+                // Auto-load previous to allow scrolling up
+                if (topOffset > 0) {
+                    await fetchPrevious();
+                }
+
+            } catch (e) {
+                console.error(e);
+                isLoading = false;
+            }
+        }
 
         function applySearchHighlight() {
             const container = document.getElementById('logs-container');
@@ -253,7 +297,7 @@
             if (log.raw) return log;
 
             const priorityKeys = ["time", "msg", "datastore-name", "logger", "transaction-id"];
-            const excludedKeys = ["content", "raw-request", "updates", "deletes", "raw-response", "explicit-deletes", "updates-owner", "deletes-owner", "tree", "data"];
+            const excludedKeys = ["content", "raw-request", "updates", "deletes", "raw-response", "response", "explicit-deletes", "updates-owner", "deletes-owner", "tree", "data"];
             const newLog = {};
 
             // Add priority keys first if they exist
@@ -273,13 +317,16 @@
             return newLog;
         }
 
-        function renderLogs(logsToRender) {
+        function renderLogs(logsToRender, prepend = false) {
             const container = document.getElementById('logs-container');
             // Remove 'Loading...' if present
             if (container.textContent === 'Loading...' && logsToRender.length > 0) {
                  container.innerHTML = '';
             }
             
+            // Use fragment for batch insertion
+            const fragment = document.createDocumentFragment();
+
             logsToRender.forEach((log, index) => {
                 const div = document.createElement('div');
                 div.className = 'log-entry';
@@ -313,8 +360,49 @@
                        showDetails(log);
                    }
                 };
-                container.appendChild(div);
+                fragment.appendChild(div);
             });
+
+            if (prepend && container.firstChild) {
+                container.insertBefore(fragment, container.firstChild);
+            } else {
+                container.appendChild(fragment);
+            }
+        }
+
+        async function fetchPrevious() {
+            if (isLoading) return;
+            isLoading = true;
+
+            // Compute range
+            const fetchLimit = limit; // 50
+            const start = Math.max(0, topOffset - fetchLimit);
+            const count = topOffset - start;
+            
+            if (count <= 0) {
+                isLoading = false;
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/logs?offset=${start}&limit=${count}&datastore=${encodeURIComponent(currentFilter)}`);
+                const newLogs = await response.json();
+                
+                if (newLogs.length > 0) {
+                    const oldHeight = document.body.scrollHeight;
+                    renderLogs(newLogs, true);
+                    const newHeight = document.body.scrollHeight;
+                    // Adjust scroll to maintain position
+                    window.scrollTo(0, window.scrollY + (newHeight - oldHeight));
+                    
+                    topOffset = start;
+                }
+
+            } catch (e) {
+                console.error(e);
+            } finally {
+                isLoading = false;
+            }
         }
 
         // Virtual Scroll State (Global)
@@ -466,12 +554,23 @@
             let comma = node.comma ? ',' : '';
 
             // Render based on type
-            if (node.type === 'scalar') {
+            if (node.type.startsWith('scalar')) {
                 let valHtml = '';
                 if (node.value === null) valHtml = '<span class="json-null">null</span>';
                 else if (typeof node.value === 'boolean') valHtml = `<span class="json-boolean">${node.value}</span>`;
                 else if (typeof node.value === 'number') valHtml = `<span class="json-value">${node.value}</span>`;
-                else valHtml = `<span class="json-string">"${hl(node.value)}"</span>`;
+                else {
+                    const strVal = hl(node.value);
+                    if (node.type === 'scalar') {
+                        valHtml = `<span class="json-string">"${strVal}"</span>`;
+                    } else if (node.type === 'scalar_multiline_start') {
+                        valHtml = `<span class="json-string">"${strVal}`;
+                    } else if (node.type === 'scalar_multiline_mid') {
+                        valHtml = `<span class="json-string">${strVal}`;
+                    } else if (node.type === 'scalar_multiline_end') {
+                         valHtml = `<span class="json-string">${strVal}"</span>`;
+                    }
+                }
                 
                 content = `${keyPart}${valHtml}${comma}`;
             } else if (node.type === 'start_obj') {
@@ -522,6 +621,26 @@
                 const comma = !isLast;
 
                 if (obj === null || typeof obj !== 'object') {
+                    if (typeof obj === 'string' && obj.includes('\n')) {
+                        const lines = obj.split(/\r?\n/);
+                        lines.forEach((line, idx) => {
+                            let type = 'scalar_multiline_mid';
+                            let nodeKey = undefined;
+                            let nodeComma = false;
+                            
+                            if (idx === 0) {
+                                type = 'scalar_multiline_start';
+                                nodeKey = key;
+                            }
+                            if (idx === lines.length - 1) {
+                                type = 'scalar_multiline_end';
+                                nodeComma = comma;
+                            }
+                            
+                            flatNodes.push({ type, depth: depth + (idx > 0 ? 1 : 0), key: nodeKey, value: line, comma: nodeComma });
+                        });
+                        return;
+                    }
                     flatNodes.push({ type: 'scalar', depth, key, value: obj, comma });
                     return;
                 }
@@ -670,10 +789,39 @@
                              processNestedJson(obj[key]);
                          } catch (e) {}
                     }
+                    // Basic XML pretty print for 'response' field
+                    if (key === 'response' && typeof obj[key] === 'string' && obj[key].startsWith('<')) {
+                         // Simple formatting: newlines after >
+                         // Or we can rely on displaying as pre-wrap, but it might be one long string.
+                         // Let's perform a simple replace for formatting
+                         obj[key] = formatXml(obj[key]);
+                    }
                 } else if (typeof obj[key] === 'object' && obj[key] !== null) {
                     processNestedJson(obj[key]);
                 }
             }
+        }
+
+        function formatXml(xml) {
+            let formatted = '';
+            let pad = 0;
+            // Add newlines
+            xml = xml.replace(/>\s*</g, '>\r\n<');
+            
+            xml.split('\r\n').forEach(node => {
+                let indent = 0;
+                if (node.match(/.+<\/\w[^>]*>$/)) {
+                    indent = 0;
+                } else if (node.match(/^<\/\w/)) {
+                    if (pad !== 0) pad -= 1;
+                } else if (node.match(/^<\w[^>]*[^\/]>.*$/)) {
+                    indent = 1;
+                }
+                
+                formatted += '  '.repeat(pad) + node + '\r\n';
+                pad += indent;
+            });
+            return formatted.trim();
         }
 
         async function processLeafVariants(obj) {

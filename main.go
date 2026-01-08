@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	sdcpb "github.com/sdcio/sdc-protos/sdcpb"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -20,6 +21,7 @@ type LogLine map[string]interface{}
 
 type LogMeta struct {
 	DatastoreName string `json:"datastore-name"`
+	Time          string `json:"time"`
 }
 
 var (
@@ -51,6 +53,7 @@ func main() {
 
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 	http.HandleFunc("/api/logs", handleLogs)
+	http.HandleFunc("/api/offset", handleFindOffset)
 	http.HandleFunc("/api/decode", handleDecode)
 	http.HandleFunc("/api/decode/batch", handleDecodeBatch)
 	http.HandleFunc("/api/datastores", handleDatastores)
@@ -122,6 +125,64 @@ func handleDatastores(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
+}
+
+func handleFindOffset(w http.ResponseWriter, r *http.Request) {
+	targetTime := r.URL.Query().Get("time")
+	datastore := r.URL.Query().Get("datastore")
+
+	// Normalize input time (e.g. 8:20 -> 08:20)
+	if len(targetTime) > 0 && targetTime[0] != '0' && strings.Contains(targetTime, ":") {
+		parts := strings.Split(targetTime, ":")
+		if len(parts) > 0 && len(parts[0]) == 1 {
+			targetTime = "0" + targetTime
+		}
+	}
+
+	count := 0
+	foundOffset := -1
+
+	for _, meta := range metaData {
+		if datastore != "" && meta.DatastoreName != datastore {
+			continue
+		}
+
+		tVal := meta.Time
+		if tVal != "" {
+			// Extract time from ISO string "2006-01-02T15:04:05..."
+			// We split by T and take the second part
+			if idx := strings.Index(tVal, "T"); idx != -1 {
+				timePart := tVal[idx+1:]
+				// If valid part, compare
+				// We compare prefix length to support "15:39" vs "15:39:47.123"
+				compareLen := len(targetTime)
+				if len(timePart) >= compareLen {
+					if timePart[:compareLen] >= targetTime {
+						foundOffset = count
+						break
+					}
+				} else {
+					// Time in log is shorter than target? Rare but compare directly
+					if timePart >= targetTime {
+						foundOffset = count
+						break
+					}
+				}
+			}
+		}
+		count++
+	}
+
+	if foundOffset == -1 {
+		// Not found, default to end? Or 0?
+		// Let's return 0 if nothing found so user sees something, or handle in frontend
+		// Usually if time > all logs, we probably want to show the End.
+		// If we return count (which is total filtered items), we show nothing (empty).
+		foundOffset = count
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"offset": foundOffset})
 }
 
 func handleLogs(w http.ResponseWriter, r *http.Request) {
