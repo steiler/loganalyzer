@@ -32,15 +32,21 @@
 *   **Datastore Filtering:** A dropdown allows filtering logs by `datastore-name`.
 *   **Time Jump:** Users can jump to a specific timestamp (supporting `HH:MM:SS` and `H:MM` formats). The system locates the nearest log entry and updates the view.
 *   **Bidirectional Infinite Scrolling:** The frontend supports scrolling both down (to load newer logs) and up (to load older logs). When jumping to a specific time, previous logs are pre-fetched to allow immediate upward scrolling.
+*   **Server-Side Search:** Search queries are executed on the backend, which scans all log lines against the query (case-insensitive substring matching) and returns global match indices relative to the filtered dataset. This enables searching across logs not yet loaded on the frontend.
+*   **Search Navigation with Gap-Filling:**
+    *   When user navigates to a match position that is not currently visible in the viewport, the frontend loads logs around that position to fill the gap.
+    *   The system maintains continuity by loading sufficient context (buffers above and below) around the target match.
+    *   Prev/next navigation wraps around at boundaries.
 *   **Search Interaction:**
-    *   **Double-Click:** Double-clicking text in a log entry automatically populates the search box with selected text and triggers highlighting. This action prevents the detail modal from opening.
-    *   **Keyboard Shortcut:** Pressing `Ctrl+Shift+F` or `Alt+S` in the overview (when modal is closed) inserts the current text selection into the main search input and triggers highlighting. Does not interfere with typing in input fields.
+    *   **Double-Click:** Double-clicking text in a log entry automatically populates the search box with selected text and triggers server-side search. This action prevents the detail modal from opening.
+    *   **Keyboard Shortcut:** Pressing `Ctrl+Shift+F` or `Alt+S` in the overview (when modal is closed) inserts the current text selection into the main search input and triggers server-side search. Does not interfere with typing in input fields.
     *   **Clear Search:** A dedicated "Clear" button and the ESC key (when no modal is open) reset the search filter.
     *   **ESC Key:** Closes the modal if open; otherwise clears search highlights.
 
 ### 4. Presentation
 *   **Syntax Highlighting:** JSON in the modal is pretty-printed and syntax-highlighted (keys, strings, booleans, nulls).
 *   **Formatting:** Newlines in JSON strings (specifically in `msg`, `content`, or XML responses) are respected and rendered on separate lines in the virtualized view.
+*   **Overview Search:** Client-side search in the overview displays a total match count (e.g., "N matches") next to the search input. Users explicitly navigate between matches using prev/next buttons, Enter key (next), or Shift+Enter (previous). No automatic jump to first match; user initiates navigation.
 *   **Modal Search:** In-modal search with next/prev navigation, match counters, and highlighting. Enter/Shift+Enter navigate matches.
 *   **Collapse/Expand:** Modal content supports collapsing and expanding nested objects and arrays via gutter +/- buttons for easier navigation of large structures.
 *   **Horizontal Scroll:** The modal preserves long-line formatting and enables horizontal scrolling for overflow content to avoid line wrapping and clipping.
@@ -51,6 +57,7 @@
     *   **Endpoints:** 
         *   `/api/logs`: Fetch log slices.
         *   `/api/offset`: Find file offset by timestamp.
+        *   `/api/search`: Server-side search across all logs, respecting datastore filter; returns array of match indices in filtered view and total count.
         *   `/api/decode`: Single value decoding (legacy).
         *   `/api/decode/batch`: Batch decoding of multiple values.
         *   `/api/datastores`: List available datastores.
@@ -60,10 +67,14 @@
 
 ## Key Architectural Decisions & Rationale
 
-### 1. Performance Strategy for Large Files
+### 4. Performance Strategy for Large Files
 *   **Memory Efficiency:** The backend reads the log file into memory as raw strings (`[]string`) plus a lightweight metadata slice (`LogMeta` containing `Time` and `DatastoreName`) for filtering and seeking.
 *   **On-Demand Parsing:** JSON unmarshalling occurs only for the specific slice of lines requested by the frontend pagination.
-*   **Lazy Loading:** The frontend uses bidirectional infinite scrolling to fetch batches of logs.
+*   **Lazy Loading:** The frontend uses bidirectional infinite scrolling to fetch batches of logs with the following refinements:
+    *   **Smooth Scroll Maintenance:** When prepending logs (loading upward), scroll position is preserved by tracking a reference element's visual position on screen before and after rendering, ensuring the user's viewing context remains intact.
+    *   **Debounced Scroll Events:** Scroll event listeners use a 50ms debounce to prevent rapid, redundant load requests during fast scrolling.
+    *   **Reference-Based Positioning:** Instead of relying on height calculations which can be unreliable, the frontend uses `getBoundingClientRect()` to track visual position and `scrollBy()` to maintain it, providing smoother and more predictable scrolling.
+*   **Server-Side Search Efficiency:** Search scans the raw strings in memory, avoiding JSON parsing overhead until results are needed. Returns match indices for efficient gap-filling.
 *   **Frontend Virtualization (Modal):** The detail modal uses a **Flattened Virtual Scroll** strategy.
     *   Instead of recursive DOM creation (which blocks the main thread on large trees), the nested JSON is flattened into a linear array of lightweight descriptor objects (`flatNodes`).
     *   A virtual window renders only the usage nodes currently visible in the viewport.
@@ -73,6 +84,8 @@
 ### 2. Robustness
 *   **Corruption Handling:** The file loader explicitly skips the first line relative to the file reader to prevent `bufio.Scanner: token too long` errors or JSON parse errors caused by log rotation or truncation.
 *   **Recursive Parsing:** The frontend attempts to parse nested JSON strings but fails gracefully (leaving the string as-is) if parsing fails.
+*   **Route Registration Order:** API handlers are registered before the catch-all file server to ensure `/api/*` requests reach their handlers instead of being intercepted by the static file server.
+*   **Empty Result Handling:** The backend initializes result slices as empty arrays (`make([]LogLine, 0)`) rather than nil to ensure JSON encoding produces `[]` instead of `null`, preventing frontend errors when no logs match a query.
 
 ### 3. Decoding Strategy
 *   **Server-Side Decoding:** Protobuf decoding is offloaded to a backend endpoint (`/api/decode` and `/api/decode/batch`) to leverage the existing Go Protobuf definitions (`sdc-protos`) rather than rewriting proto logic in JavaScript.
@@ -84,7 +97,7 @@
 *   Reading local log files.
 *   Decoding specific field patterns (`leafVariant`).
 *   Performance for files up to ~200MB+.
-*   **Search/Highlighting:** Client-side search for loaded logs (filter text). Supports quick search via text selection (double-click) and manual clearing.
+*   **Search:** Server-side search for all logs with case-insensitive substring matching. Gap-filling when navigating to off-screen matches. Efficient handling of large datasets via index-based navigation.
 
 **Out-of-Scope:**
 *   Real-time log tailing/streaming (file is loaded once at startup).
@@ -100,10 +113,18 @@
 
 ## Recent UX Improvements (Session Notes)
 
-*   **Selection-to-Search Workflow:** Users can now quickly search for text by double-clicking (fills search box) or using `Ctrl+Shift+F`/`Alt+S` keyboard shortcuts when text is selected.
-*   **Visual Consistency:** Ellipsis indicators for expandable entries now appear directly after content text, improving scannability.
+*   **Selection-to-Search Workflow:** Users can now quickly search for text by double-clicking (fills search box) or using `Ctrl+Shift+F`/`Alt+S` keyboard shortcuts when text is selected in the overview.
+*   **Visual Consistency:** Ellipsis indicators (⋯) for expandable entries now appear directly after content text (via CSS pseudo-element on content span), improving scannability and positioning at the right point in the line.
+*   **jsonVal Decoding:** Base64-encoded JSON in `jsonVal` fields is now decoded client-side, parsed, and displayed as structured data under `jsonVal_decoded` in the modal for immediate visibility and pretty-printing.
+*   **Modal Horizontal Scrolling:** Long lines in the modal now support horizontal scrolling instead of wrapping, preserving formatting and enabling inspection of complete values.
+*   **Overview Search Match Counter:** The overview search box displays a live count of total matches across the entire filtered dataset (e.g., "42 matches"), computed server-side. When actively navigating, it shows "N of M" to indicate position in the result set.
+*   **Search Navigation with Gap-Filling:** Users can explicitly navigate between matches using prev/next buttons or Enter/Shift+Enter. When a match is not currently visible, the frontend automatically loads logs between the current view and the target match, filling the gap seamlessly to maintain a continuous scrollable view.
+    *   **Buttons:** Prev/Next buttons toggle between highlighted matches.
+    *   **Keyboard:** Enter key jumps to next match; Shift+Enter jumps to previous match.
+    *   **Behavior:** Active match is highlighted and scrolled into view; navigation wraps around at boundaries.
 *   **Copy Fidelity:** Modal copy outputs the formatted, indented view that matches the on-screen presentation rather than raw JSON.
-*   **Keyboard Navigation:** ESC key intelligently closes modal or clears search depending on context; Enter/Shift+Enter navigate modal search results.
+*   **Keyboard Navigation:** ESC key intelligently closes modal or clears search depending on context; Enter/Shift+Enter navigate overview search results or modal search results.
+*   **Multi-Platform Releases:** GoReleaser configuration (`goreleaser.yaml`) enables automated builds and releases for Windows 64-bit, Linux (amd64 and arm64), and macOS (amd64 and arm64) with appropriate archive formats (.zip for Windows, .tar.gz for others).
 
 
 Treat this file as the authoritative source of truth.

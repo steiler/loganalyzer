@@ -137,7 +137,10 @@
 
         <label for="search-input" style="margin-left: 20px;">Search:</label>
         <input type="text" id="search-input" placeholder="Type to highlight...">
-        <button onclick="clearSearch()">Clear</button>
+        <button id="search-prev" title="Previous match" style="margin-left: 5px;">▲</button>
+        <button id="search-next" title="Next match">▼</button>
+        <button onclick="clearSearch()" style="margin-left: 5px;">Clear</button>
+        <span id="search-stats" style="font-size: 0.9em; color: #666; margin-left: 10px;"></span>
     </div>
     <div id="logs-container">Loading...</div>
 
@@ -164,6 +167,7 @@
         ];
 
         let isLoading = false;
+        let scrollTimeout = null; // Debounce scroll events
         let currentOffset = 0;
         let topOffset = 0;
         const initialLimit = 100;
@@ -171,6 +175,8 @@
         let hasMore = true;
         let currentFilter = "";
         let currentSearchTerm = "";
+        let serverSearchMatches = []; // Global match indices from server
+        let searchMatchIndex = -1; // Current active match index
         
         // Modal state
         let currentModalData = null;
@@ -223,20 +229,45 @@
                 currentSearchTerm = e.target.value.toLowerCase();
                 applySearchHighlight();
             });
+            
+            // Search navigation buttons
+            document.getElementById('search-prev').addEventListener('click', () => {
+                navigateSearchMatch('prev');
+            });
+            document.getElementById('search-next').addEventListener('click', () => {
+                navigateSearchMatch('next');
+            });
+            
+            // Keyboard shortcuts for search navigation
+            document.getElementById('search-input').addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    if (e.shiftKey) {
+                        navigateSearchMatch('prev');
+                    } else {
+                        navigateSearchMatch('next');
+                    }
+                    e.preventDefault();
+                }
+            });
 
             await fetchLogs(true);
             
-            // Infinite scroll
-            window.onscroll = function() {
-                // Bottom
-                if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
-                    fetchLogs();
-                }
-                // Top
-                if (window.scrollY < 100 && topOffset > 0 && !isLoading) {
-                    fetchPrevious();
-                }
-            };
+            // Infinite scroll with debouncing
+            window.addEventListener('scroll', function() {
+                if (scrollTimeout) clearTimeout(scrollTimeout);
+                scrollTimeout = setTimeout(() => {
+                    // Bottom - load more
+                    if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 500) {
+                        if (!isLoading && hasMore) {
+                            fetchLogs();
+                        }
+                    }
+                    // Top - load previous
+                    if (window.scrollY < 100 && topOffset > 0 && !isLoading) {
+                        fetchPrevious();
+                    }
+                }, 50); // 50ms debounce
+            }, { passive: true });
         }
 
         async function fetchDatastores() {
@@ -300,9 +331,180 @@
             searchInput.dispatchEvent(new Event('input'));
         }
 
-        function applySearchHighlight() {
+        async function applySearchHighlight() {
+            // Fetch search results from server
+            if (!currentSearchTerm) {
+                serverSearchMatches = [];
+                searchMatchIndex = -1;
+                updateSearchStats();
+                clearAllSearchMatches();
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/search?q=${encodeURIComponent(currentSearchTerm)}&datastore=${encodeURIComponent(currentFilter)}`);
+                const data = await response.json();
+                serverSearchMatches = data.matches; // Global match indices
+                searchMatchIndex = -1; // Reset navigation
+                updateSearchStats();
+            } catch (e) {
+                console.error("Search error:", e);
+                serverSearchMatches = [];
+                updateSearchStats();
+            }
+        }
+
+        function clearAllSearchMatches() {
             const container = document.getElementById('logs-container');
             const entries = container.getElementsByClassName('log-entry');
+            for (let entry of entries) {
+                entry.classList.remove('search-match');
+                entry.classList.remove('active-entry');
+            }
+        }
+
+        function updateSearchStats() {
+            const statsEl = document.getElementById('search-stats');
+            if (currentSearchTerm && serverSearchMatches.length > 0) {
+                if (searchMatchIndex >= 0) {
+                    statsEl.textContent = `${searchMatchIndex + 1} of ${serverSearchMatches.length}`;
+                } else {
+                    statsEl.textContent = `${serverSearchMatches.length} match${serverSearchMatches.length !== 1 ? 'es' : ''}`;
+                }
+            } else if (currentSearchTerm) {
+                statsEl.textContent = `0 matches`;
+            } else {
+                statsEl.textContent = '';
+            }
+        }
+
+        async function navigateSearchMatch(direction) {
+            if (serverSearchMatches.length === 0) return;
+
+            // Calculate next match index
+            if (direction === 'next') {
+                searchMatchIndex = (searchMatchIndex + 1) % serverSearchMatches.length;
+            } else if (direction === 'prev') {
+                searchMatchIndex = (searchMatchIndex - 1 + serverSearchMatches.length) % serverSearchMatches.length;
+            }
+
+            // Get the target match position in the filtered view
+            const targetMatchPos = serverSearchMatches[searchMatchIndex];
+            
+            // Check if this match is visible in the current view
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            
+            // Calculate current view range
+            const currentViewStart = topOffset;
+            const currentViewEnd = topOffset + entries.length;
+
+            if (targetMatchPos >= currentViewStart && targetMatchPos < currentViewEnd) {
+                // Match is visible - just highlight it
+                highlightMatchAtPosition(targetMatchPos - currentViewStart);
+                updateSearchStats();
+            } else {
+                // Match is not visible - load it with surrounding context
+                await loadAndHighlightMatch(targetMatchPos);
+            }
+        }
+
+        function highlightMatchAtPosition(elementIndex) {
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            
+            // Clear all active markers
+            for (let entry of entries) {
+                entry.classList.remove('search-match');
+                entry.classList.remove('active-entry');
+            }
+            
+            if (elementIndex >= 0 && elementIndex < entries.length) {
+                entries[elementIndex].classList.add('search-match');
+                entries[elementIndex].classList.add('active-entry');
+                entries[elementIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            
+            updateSearchStats();
+        }
+
+        async function loadAndHighlightMatch(targetPos) {
+            // Load the match with surrounding logs to fill the gap
+            isLoading = true;
+            
+            try {
+                // Load a range around the target, centered on it
+                const bufferSize = Math.floor(initialLimit / 2);
+                const startOffset = Math.max(0, targetPos - bufferSize);
+                const endOffset = targetPos + bufferSize;
+                
+                // Fetch to cover the range
+                const response = await fetch(`/api/logs?offset=${startOffset}&limit=${endOffset - startOffset + 1}&datastore=${encodeURIComponent(currentFilter)}`);
+                const newLogs = await response.json();
+                
+                // Determine if we need to fill gap above or below current view
+                const container = document.getElementById('logs-container');
+                const entries = container.getElementsByClassName('log-entry');
+                const currentViewStart = topOffset;
+                const currentViewEnd = topOffset + entries.length;
+                
+                if (startOffset < currentViewStart) {
+                    // Load above - prepend and adjust scroll using reference element
+                    clearAllSearchMatches();
+                    const firstEntry = container.querySelector('.log-entry');
+                    const firstEntryTop = firstEntry ? firstEntry.getBoundingClientRect().top : null;
+                    
+                    // Render gap-filling logs above
+                    const gapSize = currentViewStart - startOffset;
+                    const aboveLogs = newLogs.slice(0, gapSize);
+                    if (aboveLogs.length > 0) {
+                        renderLogs(aboveLogs, true);
+                    }
+                    
+                    // Scroll to maintain reference element position
+                    if (firstEntry && firstEntry.parentNode) {
+                        const newFirstEntryTop = firstEntry.getBoundingClientRect().top;
+                        const scrollAdjustment = newFirstEntryTop - firstEntryTop;
+                        window.scrollBy(0, scrollAdjustment);
+                    }
+                    
+                    topOffset = startOffset;
+                } else if (endOffset > currentViewEnd) {
+                    // Load below - append
+                    clearAllSearchMatches();
+                    const gapStart = currentViewEnd - startOffset;
+                    const belowLogs = newLogs.slice(gapStart);
+                    if (belowLogs.length > 0) {
+                        renderLogs(belowLogs, false);
+                    }
+                    currentOffset = endOffset;
+                    hasMore = true;
+                } else {
+                    // Target is within the new range, clear and reload that section
+                    clearAllSearchMatches();
+                    document.getElementById('logs-container').innerHTML = '';
+                    renderLogs(newLogs, false);
+                    topOffset = startOffset;
+                    currentOffset = startOffset + newLogs.length;
+                    hasMore = true;
+                }
+                
+                // Re-highlight current selection
+                const newEntries = document.getElementsByClassName('log-entry');
+                const offsetInView = targetPos - topOffset;
+                highlightMatchAtPosition(offsetInView);
+                
+            } catch (e) {
+                console.error("Error loading match:", e);
+            } finally {
+                isLoading = false;
+            }
+        }
+        
+        function applySearchHighlight_old() {
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            let matchCount = 0;
             
             for (let div of entries) {
                 if (!currentSearchTerm) {
@@ -313,9 +515,18 @@
                 // Search in the full log data attached to the element
                 if (div.logData && JSON.stringify(div.logData).toLowerCase().includes(currentSearchTerm)) {
                      div.classList.add('search-match');
+                     matchCount++;
                 } else {
                      div.classList.remove('search-match');
                 }
+            }
+            
+            // Update search stats
+            const statsEl = document.getElementById('search-stats');
+            if (currentSearchTerm) {
+                statsEl.textContent = `${matchCount} match${matchCount !== 1 ? 'es' : ''}`;
+            } else {
+                statsEl.textContent = '';
             }
         }
 
@@ -462,11 +673,21 @@
                 const newLogs = await response.json();
                 
                 if (newLogs.length > 0) {
-                    const oldHeight = document.body.scrollHeight;
+                    // Get the first log entry currently in view as reference
+                    const container = document.getElementById('logs-container');
+                    const firstEntry = container.querySelector('.log-entry');
+                    const firstEntryTop = firstEntry ? firstEntry.getBoundingClientRect().top : null;
+                    
+                    // Prepend new logs
                     renderLogs(newLogs, true);
-                    const newHeight = document.body.scrollHeight;
-                    // Adjust scroll to maintain position
-                    window.scrollTo(0, window.scrollY + (newHeight - oldHeight));
+                    
+                    // Find the reference element after rendering and scroll to maintain its position
+                    if (firstEntry && firstEntry.parentNode) {
+                        // Scroll so the old first entry stays in the same visual position
+                        const newFirstEntryTop = firstEntry.getBoundingClientRect().top;
+                        const scrollAdjustment = newFirstEntryTop - firstEntryTop;
+                        window.scrollBy(0, scrollAdjustment);
+                    }
                     
                     topOffset = start;
                 }

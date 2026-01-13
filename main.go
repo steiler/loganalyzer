@@ -51,12 +51,16 @@ func main() {
 		log.Fatal(err)
 	}
 
-	http.Handle("/", http.FileServer(http.Dir("./static")))
+	// Register API handlers first (more specific routes)
 	http.HandleFunc("/api/logs", handleLogs)
 	http.HandleFunc("/api/offset", handleFindOffset)
+	http.HandleFunc("/api/search", handleSearch)
 	http.HandleFunc("/api/decode", handleDecode)
 	http.HandleFunc("/api/decode/batch", handleDecodeBatch)
 	http.HandleFunc("/api/datastores", handleDatastores)
+
+	// Register file server last (catch-all)
+	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	fmt.Printf("Starting server on :8080 with log file: %s (%d lines)\n", logFile, len(rawLines))
 	log.Fatal(http.ListenAndServe(":8080", nil))
@@ -202,7 +206,7 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 		limit = 1000
 	}
 
-	var result []LogLine
+	var result []LogLine = make([]LogLine, 0) // Initialize as empty slice, not nil
 
 	// Filtering and Paginating
 	// If datastore is empty, we just slice rawLines
@@ -216,12 +220,13 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Valid match
+		// Valid match - check if we should skip or collect
 		if skipped < offset {
 			skipped++
 			continue
 		}
 
+		// We've skipped enough, now collect results
 		if count >= limit {
 			break
 		}
@@ -332,4 +337,39 @@ func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(results)
+}
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	query := strings.ToLower(r.URL.Query().Get("q"))
+	datastore := r.URL.Query().Get("datastore")
+
+	if query == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": []int{},
+			"count":   0,
+		})
+		return
+	}
+
+	var matches []int
+
+	// Count filtered logs for match offset calculation
+	count := 0
+	for i, meta := range metaData {
+		if datastore != "" && meta.DatastoreName != datastore {
+			continue
+		}
+
+		// Search in the log line (case-insensitive)
+		if strings.Contains(strings.ToLower(rawLines[i]), query) {
+			matches = append(matches, count)
+		}
+		count++
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches": matches,
+		"count":   count,
+	})
 }
