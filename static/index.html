@@ -29,6 +29,12 @@
         .log-entry.search-match { background-color: #ffff99; }
         .log-entry.active-entry { background-color: #ffe0b2; outline: 1px solid #ffcc80; }
         .log-entry.marked-entry { background-color: #d0f0c0; }
+        .log-entry.error-level { background-color: #ffcccc; }
+        .highlight-badge { display: inline-flex; align-items: center; gap: 6px; background: var(--highlight-bg, #e3f2fd); border: 1px solid var(--highlight-border, #90caf9); border-radius: 3px; padding: 2px 8px; margin: 2px; font-size: 0.85em; cursor: pointer; color: #0d47a1; }
+        .highlight-badge:hover { background: #bbdefb; }
+        .highlight-badge .remove { margin-left: 2px; font-weight: bold; color: inherit; }
+        .highlight-badge .swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
+        .log-entry.highlight-match { background-color: var(--highlight-color, #ffffcc); }
         body.modal-open { overflow: hidden; }
         /* Modal styles */
         .modal { display: none; position: fixed; z-index: 20; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.4); }
@@ -118,6 +124,13 @@
             right: 0;
             min-width: max-content; /* allow horizontal overflow for long lines */
         }
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+        #new-logs-indicator.fade-out {
+            animation: fadeOut 0.5s ease-out forwards;
+        }
     </style>
 </head>
 <body>
@@ -136,11 +149,18 @@
         <button onclick="jumpToTime()">Go</button>
 
         <label for="search-input" style="margin-left: 20px;">Search:</label>
-        <input type="text" id="search-input" placeholder="Type to highlight...">
+        <input type="text" id="search-input" placeholder="Find and navigate...">
         <button id="search-prev" title="Previous match" style="margin-left: 5px;">▲</button>
         <button id="search-next" title="Next match">▼</button>
         <button onclick="clearSearch()" style="margin-left: 5px;">Clear</button>
         <span id="search-stats" style="font-size: 0.9em; color: #666; margin-left: 10px;"></span>
+        <div style="margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <label>Highlights:</label>
+            <input type="text" id="highlight-input" placeholder="Add highlight term" size="18" aria-label="Add highlight term">
+            <button id="highlight-add">Add</button>
+            <button onclick="clearHighlights()">Clear All</button>
+            <span id="highlights-container" style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;"></span>
+        </div>
     </div>
     <div id="logs-container">Loading...</div>
 
@@ -177,17 +197,29 @@
         let currentSearchTerm = "";
         let serverSearchMatches = []; // Global match indices from server
         let searchMatchIndex = -1; // Current active match index
+        const highlightPalette = ['#ffe082', '#c5e1a5', '#b2ebf2', '#d1c4e9', '#ffccbc', '#f8bbd0', '#c8e6c9', '#bbdefb', '#fff59d', '#e6ee9c', '#b39ddb', '#80cbc4', '#ffab91', '#aed581', '#90caf9', '#f48fb1'];
+        let highlightTerms = [];
+        let highlightColorMap = {};
+        let highlightColorCursor = 0;
+        let markedIndices = new Set();
+        let stateSaveTimeout = null;
+        let restoredOffset = 0;
+        
+        // Follow mode state
+        let totalLogCount = 0;
+        let lastKnownTotal = 0;
+        let pollInterval = null;
         
         // Modal state
         let currentModalData = null;
         let modalSearchMatches = [];
         let modalSearchIndex = -1;
 
-        async function fetchLogs(reset = false) {
+        async function fetchLogs(reset = false, startOffset = null) {
             if (isLoading) return;
             if (reset) {
-                currentOffset = 0;
-                topOffset = 0;
+                currentOffset = startOffset !== null ? startOffset : 0;
+                topOffset = currentOffset;
                 hasMore = true;
                 document.getElementById('logs-container').innerHTML = '';
             }
@@ -198,14 +230,22 @@
             
             try {
                 const response = await fetch(`/api/logs?offset=${currentOffset}&limit=${fetchLimit}&datastore=${encodeURIComponent(currentFilter)}`);
-                const newLogs = await response.json();
+                const data = await response.json();
+                const newLogs = data.logs || data; // Handle both {logs: [], total: N} and legacy array format
+                const total = data.total !== undefined ? data.total : null;
+                
+                if (total !== null) {
+                    totalLogCount = total;
+                    if (lastKnownTotal === 0) lastKnownTotal = total;
+                    checkForNewLogs();
+                }
                 
                 if (newLogs.length < fetchLimit) {
                     hasMore = false;
                 }
                 
                 // We should just render the new logs
-                renderLogs(newLogs);
+                renderLogs(newLogs, false, currentOffset);
                 
                 currentOffset += newLogs.length;
 
@@ -222,8 +262,148 @@
             }
         }
 
+        // Save scroll position when scrolling
+        window.addEventListener('scroll', () => {
+            debounceSaveViewState();
+        }, { passive: true });
+
+        function checkForNewLogs() {
+            if (totalLogCount > lastKnownTotal) {
+                const newCount = totalLogCount - lastKnownTotal;
+                const nearBottom = (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 500;
+                // If user is at bottom, auto-load new logs silently
+                if (nearBottom) {
+                    loadNewLogsAuto();
+                } else {
+                    // If scrolled away, show indicator
+                    showNewLogsIndicator(newCount);
+                }
+            }
+        }
+
+        function showNewLogsIndicator(count) {
+            let indicator = document.getElementById('new-logs-indicator');
+            if (!indicator) {
+                indicator = document.createElement('div');
+                indicator.id = 'new-logs-indicator';
+                indicator.style.cssText = 'position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; padding: 12px 20px; border-radius: 4px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 1000; font-family: monospace;';
+                indicator.onclick = () => {
+                    if (indicator.dismissTimeout) clearTimeout(indicator.dismissTimeout);
+                    loadNewLogs();
+                    indicator.remove();
+                };
+                // On mouse enter: pause dismissal
+                indicator.addEventListener('mouseenter', () => {
+                    if (indicator.dismissTimeout) {
+                        clearTimeout(indicator.dismissTimeout);
+                        indicator.dismissTimeout = null;
+                    }
+                    indicator.classList.remove('fade-out');
+                });
+                // On mouse leave: restart timer
+                indicator.addEventListener('mouseleave', () => {
+                    indicator.dismissTimeout = setTimeout(() => {
+                        indicator.classList.add('fade-out');
+                        setTimeout(() => {
+                            if (indicator && indicator.parentNode) indicator.remove();
+                        }, 500);
+                    }, 2000);
+                });
+                document.body.appendChild(indicator);
+            }
+            indicator.classList.remove('fade-out');
+            if (indicator.dismissTimeout) clearTimeout(indicator.dismissTimeout);
+            indicator.textContent = `${count} new log${count > 1 ? 's' : ''} available - Click to load`;
+            indicator.dismissTimeout = setTimeout(() => {
+                indicator.classList.add('fade-out');
+                setTimeout(() => {
+                    if (indicator && indicator.parentNode) indicator.remove();
+                }, 500);
+            }, 2000);
+        }
+
+        async function loadNewLogsAuto() {
+            // Auto-load new logs when user is at bottom - just append without scroll disruption
+            if (isLoading) return;
+            const newCount = totalLogCount - lastKnownTotal;
+            
+            try {
+                const response = await fetch(`/api/logs?offset=${currentOffset}&limit=100&datastore=${encodeURIComponent(currentFilter)}`);
+                const data = await response.json();
+                const newLogs = data.logs || data;
+                
+                if (newLogs.length > 0) {
+                    renderLogs(newLogs, false, currentOffset);
+                    currentOffset += newLogs.length;
+                    lastKnownTotal = totalLogCount; // Only update after successful load
+                    // Remove indicator since we auto-loaded
+                    const indicator = document.getElementById('new-logs-indicator');
+                    if (indicator) indicator.remove();
+                }
+            } catch (e) {
+                console.error('Auto-load error:', e);
+            }
+        }
+
+        async function loadNewLogs() {
+            lastKnownTotal = totalLogCount; // Mark as read when user clicks
+            hasMore = true;
+            // Jump to the end - load latest entries
+            // Start from max(0, totalLogCount - initialLimit) to show recent entries
+            const startOffset = Math.max(0, totalLogCount - initialLimit);
+            await fetchLogs(true, startOffset);
+            // Scroll to bottom after loading
+            setTimeout(() => {
+                window.scrollTo(0, document.body.scrollHeight);
+            }, 100);
+        }
+
+        async function pollForNewLogs() {
+            if (!currentFilter) return;  // Remove isLoading check to allow polling regardless of current activity
+            
+            try {
+                const response = await fetch(`/api/logs?offset=0&limit=1&datastore=${encodeURIComponent(currentFilter)}`);
+                const data = await response.json();
+                const total = data.total !== undefined ? data.total : null;
+                
+                if (total !== null && total !== totalLogCount) {
+                    totalLogCount = total;
+                    checkForNewLogs();
+                }
+            } catch (e) {
+                console.error('Poll error:', e);
+            }
+        }
+
+        function startPolling() {
+            if (pollInterval) return;
+            // Poll every 5 seconds
+            pollInterval = setInterval(pollForNewLogs, 5000);
+        }
+
+        function stopPolling() {
+            if (pollInterval) {
+                clearInterval(pollInterval);
+                pollInterval = null;
+            }
+        }
+
         async function init() {
             await fetchDatastores();
+            await loadViewState();
+            
+            // Always poll for new logs (independent of scroll position)
+            startPolling();
+            
+            // Track scroll position to determine auto-load vs indicator behavior
+            window.addEventListener('scroll', () => {
+                const nearBottom = (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 500;
+                if (nearBottom && !pollInterval) {
+                    // Resume polling if scrolled near bottom
+                    startPolling();
+                }
+                // Note: We don't stop polling anymore - it always runs in background
+            }, { passive: true });
             
             document.getElementById('search-input').addEventListener('input', (e) => {
                 currentSearchTerm = e.target.value.toLowerCase();
@@ -250,7 +430,30 @@
                 }
             });
 
-            await fetchLogs(true);
+            const highlightInput = document.getElementById('highlight-input');
+            if (highlightInput) {
+                highlightInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        addHighlightFromInput();
+                        e.preventDefault();
+                    }
+                });
+            }
+
+            const highlightAddBtn = document.getElementById('highlight-add');
+            if (highlightAddBtn) {
+                highlightAddBtn.addEventListener('click', addHighlightFromInput);
+            }
+
+            await fetchLogs(true, restoredOffset || 0);
+            
+            // Scroll to show the first entry after restore
+            if (restoredOffset && restoredOffset > 0) {
+                const entries = document.getElementsByClassName('log-entry');
+                if (entries.length > 0) {
+                    entries[0].scrollIntoView({ behavior: 'auto', block: 'start' });
+                }
+            }
             
             // Infinite scroll with debouncing
             window.addEventListener('scroll', function() {
@@ -269,6 +472,18 @@
                 }, 50); // 50ms debounce
             }, { passive: true });
         }
+
+        // Save state before page unload (tab close, navigation, refresh)
+        window.addEventListener('beforeunload', () => {
+            saveViewStateSync();
+        });
+
+        // Also save on visibility change (tab goes hidden)
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                saveViewStateSync();
+            }
+        });
 
         async function fetchDatastores() {
             const response = await fetch('/api/datastores');
@@ -290,7 +505,116 @@
             filterSelect.onchange = (e) => {
                 currentFilter = e.target.value;
                 fetchLogs(true);
+                debounceSaveViewState();
             };
+        }
+
+        async function loadViewState() {
+            try {
+                const response = await fetch('/api/viewstate');
+                const state = await response.json();
+                
+                if (state.highlightTerms && Array.isArray(state.highlightTerms)) {
+                    highlightTerms = state.highlightTerms;
+                    highlightColorMap = {};
+                    highlightColorCursor = 0;
+                    for (const item of highlightTerms) {
+                        const lower = item.term.toLowerCase();
+                        highlightColorMap[lower] = item.color;
+                        highlightColorCursor++;
+                    }
+                    renderHighlightBadges();
+                }
+                
+                if (state.markedIndices && Array.isArray(state.markedIndices)) {
+                    markedIndices = new Set(state.markedIndices);
+                }
+                
+                if (typeof state.offset === 'number' && state.offset >= 0) {
+                    restoredOffset = state.offset;
+                }
+                
+                if (state.datastore) {
+                    currentFilter = state.datastore;
+                    const filterSelect = document.getElementById('datastore-filter');
+                    if (filterSelect) {
+                        filterSelect.value = state.datastore;
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to load view state:", e);
+            }
+        }
+
+        function getFirstVisibleLogIndex() {
+            const container = document.getElementById('logs-container');
+            if (!container) return topOffset;
+            const entries = container.getElementsByClassName('log-entry');
+            if (entries.length === 0) return topOffset;
+            
+            // Find the first entry that's actually visible in viewport
+            // An entry is visible if its bottom is below top of viewport (rect.bottom > 0)
+            // and its top is above bottom of viewport (rect.top < window.innerHeight)
+            for (let i = 0; i < entries.length; i++) {
+                const rect = entries[i].getBoundingClientRect();
+                // Entry is visible if it overlaps with viewport
+                if (rect.bottom > 0 && rect.top < window.innerHeight) {
+                    const idx = parseInt(entries[i].dataset.index);
+                    if (!isNaN(idx)) {
+                        return Math.max(0, idx);
+                    }
+                }
+            }
+            
+            // If nothing visible (scrolled above all entries), return first entry's index
+            if (entries.length > 0) {
+                const idx = parseInt(entries[0].dataset.index);
+                if (!isNaN(idx)) {
+                    return Math.max(0, idx);
+                }
+            }
+            return topOffset;
+        }
+
+        function debounceSaveViewState() {
+            if (stateSaveTimeout) clearTimeout(stateSaveTimeout);
+            stateSaveTimeout = setTimeout(saveViewState, 1000);
+        }
+
+        async function saveViewState() {
+            if (stateSaveTimeout) clearTimeout(stateSaveTimeout);
+            const visibleOffset = getFirstVisibleLogIndex();
+            const state = {
+                highlightTerms: highlightTerms,
+                markedIndices: Array.from(markedIndices),
+                offset: visibleOffset,
+                datastore: currentFilter
+            };
+            try {
+                await fetch('/api/viewstate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(state),
+                    keepalive: true
+                });
+            } catch (e) {
+                console.error("Failed to save view state:", e);
+            }
+        }
+
+        function saveViewStateSync() {
+            const visibleOffset = getFirstVisibleLogIndex();
+            const state = {
+                highlightTerms: highlightTerms,
+                markedIndices: Array.from(markedIndices),
+                offset: visibleOffset,
+                datastore: currentFilter
+            };
+            try {
+                navigator.sendBeacon('/api/viewstate', JSON.stringify(state));
+            } catch (e) {
+                console.error("Failed to save view state via beacon:", e);
+            }
         }
         
         async function jumpToTime() {
@@ -332,7 +656,7 @@
         }
 
         async function applySearchHighlight() {
-            // Fetch search results from server
+            // Clear highlights first
             if (!currentSearchTerm) {
                 serverSearchMatches = [];
                 searchMatchIndex = -1;
@@ -341,6 +665,10 @@
                 return;
             }
 
+            // Immediate client-side highlighting of visible entries for responsive feedback
+            highlightVisibleMatches();
+
+            // Fetch complete search results from server for navigation
             try {
                 const response = await fetch(`/api/search?q=${encodeURIComponent(currentSearchTerm)}&datastore=${encodeURIComponent(currentFilter)}`);
                 const data = await response.json();
@@ -351,6 +679,24 @@
                 console.error("Search error:", e);
                 serverSearchMatches = [];
                 updateSearchStats();
+            }
+        }
+
+        function highlightVisibleMatches() {
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            
+            for (let entry of entries) {
+                entry.classList.remove('search-match');
+                entry.classList.remove('active-entry');
+                
+                // Highlight if matches current search term
+                if (currentSearchTerm && entry.logData) {
+                    const logText = JSON.stringify(entry.logData).toLowerCase();
+                    if (logText.includes(currentSearchTerm)) {
+                        entry.classList.add('search-match');
+                    }
+                }
             }
         }
 
@@ -440,7 +786,8 @@
                 
                 // Fetch to cover the range
                 const response = await fetch(`/api/logs?offset=${startOffset}&limit=${endOffset - startOffset + 1}&datastore=${encodeURIComponent(currentFilter)}`);
-                const newLogs = await response.json();
+                const data = await response.json();
+                const newLogs = data.logs || data;
                 
                 // Determine if we need to fill gap above or below current view
                 const container = document.getElementById('logs-container');
@@ -458,7 +805,7 @@
                     const gapSize = currentViewStart - startOffset;
                     const aboveLogs = newLogs.slice(0, gapSize);
                     if (aboveLogs.length > 0) {
-                        renderLogs(aboveLogs, true);
+                        renderLogs(aboveLogs, true, startOffset);
                     }
                     
                     // Scroll to maintain reference element position
@@ -475,7 +822,7 @@
                     const gapStart = currentViewEnd - startOffset;
                     const belowLogs = newLogs.slice(gapStart);
                     if (belowLogs.length > 0) {
-                        renderLogs(belowLogs, false);
+                        renderLogs(belowLogs, false, startOffset + gapStart);
                     }
                     currentOffset = endOffset;
                     hasMore = true;
@@ -483,7 +830,7 @@
                     // Target is within the new range, clear and reload that section
                     clearAllSearchMatches();
                     document.getElementById('logs-container').innerHTML = '';
-                    renderLogs(newLogs, false);
+                    renderLogs(newLogs, false, startOffset);
                     topOffset = startOffset;
                     currentOffset = startOffset + newLogs.length;
                     hasMore = true;
@@ -554,7 +901,127 @@
             return newLog;
         }
 
-        function renderLogs(logsToRender, prepend = false) {
+        function highlightColorForTerm(term) {
+            const normalized = term.toLowerCase();
+            if (highlightColorMap[normalized]) return highlightColorMap[normalized];
+            const color = highlightPalette[highlightColorCursor % highlightPalette.length];
+            highlightColorCursor++;
+            highlightColorMap[normalized] = color;
+            return color;
+        }
+
+        function toRgba(hex, alpha = 0.3) {
+            const normalized = hex.replace('#', '');
+            const full = normalized.length === 3 ? normalized.split('').map(c => c + c).join('') : normalized.padEnd(6, '0');
+            const intVal = parseInt(full.slice(0, 6), 16);
+            const r = (intVal >> 16) & 255;
+            const g = (intVal >> 8) & 255;
+            const b = intVal & 255;
+            return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+        }
+
+        function addHighlightFromInput() {
+            const input = document.getElementById('highlight-input');
+            if (!input) return;
+            addHighlight(input.value);
+        }
+
+        function addHighlight(term) {
+            if (!term) return;
+            const clean = term.trim();
+            if (!clean) return;
+            const lower = clean.toLowerCase();
+            if (highlightTerms.some(t => t.term.toLowerCase() === lower)) return;
+            const color = highlightColorForTerm(clean);
+            highlightTerms.push({ term: clean, color });
+            renderHighlightBadges();
+            applyHighlights();
+            const input = document.getElementById('highlight-input');
+            if (input) input.value = '';
+            debounceSaveViewState();
+        }
+
+        function removeHighlight(term) {
+            const targetLower = term.toLowerCase();
+            const index = highlightTerms.findIndex(t => t.term.toLowerCase() === targetLower);
+            if (index === -1) return;
+            highlightTerms.splice(index, 1);
+            renderHighlightBadges();
+            applyHighlights();
+            debounceSaveViewState();
+        }
+
+        function clearHighlights() {
+            highlightTerms = [];
+            highlightColorMap = {};
+            highlightColorCursor = 0;
+            renderHighlightBadges();
+            applyHighlights();
+            debounceSaveViewState();
+        }
+
+        function renderHighlightBadges() {
+            const container = document.getElementById('highlights-container');
+            if (!container) return;
+            container.innerHTML = '';
+            highlightTerms.forEach(({ term, color }) => {
+                const badge = document.createElement('span');
+                badge.className = 'highlight-badge';
+                badge.style.setProperty('--highlight-bg', toRgba(color, 0.35));
+                badge.style.setProperty('--highlight-border', color);
+
+                const swatch = document.createElement('span');
+                swatch.className = 'swatch';
+                swatch.style.backgroundColor = color;
+
+                const label = document.createElement('span');
+                label.textContent = term;
+
+                const remove = document.createElement('span');
+                remove.className = 'remove';
+                remove.textContent = 'x';
+                remove.onclick = (e) => {
+                    e.stopPropagation();
+                    removeHighlight(term);
+                };
+                badge.appendChild(swatch);
+                badge.appendChild(label);
+                badge.appendChild(remove);
+                container.appendChild(badge);
+            });
+        }
+
+        function applyHighlights() {
+            const container = document.getElementById('logs-container');
+            const entries = container.getElementsByClassName('log-entry');
+            const normalized = highlightTerms.map(t => ({ lower: t.term.toLowerCase(), color: t.color }));
+            for (let entry of entries) {
+                entry.classList.remove('highlight-match');
+                entry.style.removeProperty('--highlight-color');
+                if (normalized.length === 0 || !entry.logData) continue;
+                const logText = JSON.stringify(entry.logData).toLowerCase();
+                for (let item of normalized) {
+                    if (logText.includes(item.lower)) {
+                        entry.classList.add('highlight-match');
+                        entry.style.setProperty('--highlight-color', toRgba(item.color, 0.32));
+                        break;
+                    }
+                }
+            }
+        }
+
+        function getHighlightMatchColor(log) {
+            if (!log || highlightTerms.length === 0) return null;
+            const text = JSON.stringify(log).toLowerCase();
+            for (const item of highlightTerms) {
+                if (text.includes(item.term.toLowerCase())) {
+                    return item.color;
+                }
+            }
+            return null;
+        }
+
+        function renderLogs(logsToRender, prepend = false, baseIndex = 0) {
             const container = document.getElementById('logs-container');
             // Remove 'Loading...' if present
             if (container.textContent === 'Loading...' && logsToRender.length > 0) {
@@ -568,6 +1035,8 @@
                 const div = document.createElement('div');
                 div.className = 'log-entry';
                 div.logData = log; // Attach data for search
+                const globalIndex = baseIndex + index;
+                div.dataset.index = globalIndex;
 
                 let isInteresting = false;
                 if (log.msg && interestingMsgs.includes(log.msg)) {
@@ -576,9 +1045,26 @@
                     isInteresting = true;
                 }
                 
+                // Highlight ERROR level logs
+                if (log.level && log.level.toUpperCase().includes('ERROR')) {
+                    div.classList.add('error-level');
+                }
+                
                 // Check search immediately for new items
                 if (currentSearchTerm && JSON.stringify(log).toLowerCase().includes(currentSearchTerm)) {
                     div.classList.add('search-match');
+                }
+
+                const highlightColor = getHighlightMatchColor(log);
+                if (highlightColor) {
+                    div.classList.add('highlight-match');
+                    div.style.setProperty('--highlight-color', toRgba(highlightColor, 0.32));
+                } else {
+                    div.style.removeProperty('--highlight-color');
+                }
+
+                if (markedIndices.has(globalIndex)) {
+                    div.classList.add('marked-entry');
                 }
 
                 // Gutter (acts as the clickable strip)
@@ -591,6 +1077,13 @@
                 gutter.onclick = (e) => {
                     e.stopPropagation();
                     div.classList.toggle('marked-entry');
+                    const idx = parseInt(div.dataset.index);
+                    if (div.classList.contains('marked-entry')) {
+                        markedIndices.add(idx);
+                    } else {
+                        markedIndices.delete(idx);
+                    }
+                    debounceSaveViewState();
                 };
                 div.appendChild(gutter);
 
@@ -635,12 +1128,7 @@
                     const selection = window.getSelection();
                     const text = selection.toString().trim();
                     if (text) {
-                        const searchInput = document.getElementById('search-input');
-                        searchInput.value = text;
-                        // Trigger input event to update highlight
-                        searchInput.dispatchEvent(new Event('input'));
-                        
-                        // Prevent propagation
+                        addHighlight(text);
                         e.stopPropagation();
                     }
                 };
@@ -670,7 +1158,8 @@
 
             try {
                 const response = await fetch(`/api/logs?offset=${start}&limit=${count}&datastore=${encodeURIComponent(currentFilter)}`);
-                const newLogs = await response.json();
+                const data = await response.json();
+                const newLogs = data.logs || data;
                 
                 if (newLogs.length > 0) {
                     // Get the first log entry currently in view as reference
@@ -679,7 +1168,7 @@
                     const firstEntryTop = firstEntry ? firstEntry.getBoundingClientRect().top : null;
                     
                     // Prepend new logs
-                    renderLogs(newLogs, true);
+                    renderLogs(newLogs, true, start);
                     
                     // Find the reference element after rendering and scroll to maintain its position
                     if (firstEntry && firstEntry.parentNode) {
@@ -1278,12 +1767,7 @@
             const selectionText = window.getSelection().toString().trim();
             if (!selectionText) return;
 
-            const searchInput = document.getElementById('search-input');
-            if (!searchInput) return;
-
-            searchInput.value = selectionText;
-            searchInput.dispatchEvent(new Event('input'));
-            searchInput.focus();
+            addHighlight(selectionText);
 
             event.preventDefault();
             event.stopPropagation();

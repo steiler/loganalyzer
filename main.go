@@ -10,7 +10,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	sdcpb "github.com/sdcio/sdc-protos/sdcpb"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -25,13 +28,31 @@ type LogMeta struct {
 }
 
 var (
-	rawLines []string
-	metaData []LogMeta
-	logFile  string
+	rawLines    []string
+	metaData    []LogMeta
+	logFile     string
+	stateFile   string
+	followMode  bool
+	logMutex    sync.RWMutex
+	lastOffset  int64
+	partialLine string
 )
+
+type HighlightTerm struct {
+	Term  string `json:"term"`
+	Color string `json:"color"`
+}
+
+type ViewState struct {
+	HighlightTerms []HighlightTerm `json:"highlightTerms"`
+	MarkedIndices  []int           `json:"markedIndices"`
+	Offset         int             `json:"offset"`
+	Datastore      string          `json:"datastore"`
+}
 
 func main() {
 	flag.StringVar(&logFile, "file", "", "Path to the log file")
+	flag.BoolVar(&followMode, "follow", false, "Follow log file for new entries (like tail -f)")
 	flag.Parse()
 
 	if logFile == "" {
@@ -46,9 +67,17 @@ func main() {
 		log.Fatal("Please provide a log file via -file flag or as argument")
 	}
 
+	stateFile = filepath.Join(filepath.Dir(logFile), filepath.Base(logFile)+".viewstate.json")
+
 	// Pre-load file
 	if err := loadFile(logFile); err != nil {
 		log.Fatal(err)
+	}
+
+	// Start follow mode if enabled
+	if followMode {
+		go followLogFile(logFile)
+		fmt.Println("Follow mode enabled - polling for new log entries every 5 seconds")
 	}
 
 	// Register API handlers first (more specific routes)
@@ -58,12 +87,114 @@ func main() {
 	http.HandleFunc("/api/decode", handleDecode)
 	http.HandleFunc("/api/decode/batch", handleDecodeBatch)
 	http.HandleFunc("/api/datastores", handleDatastores)
+	http.HandleFunc("/api/viewstate", handleViewState)
 
 	// Register file server last (catch-all)
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	fmt.Printf("Starting server on :8080 with log file: %s (%d lines)\n", logFile, len(rawLines))
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func followLogFile(path string) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		file, err := os.Open(path)
+		if err != nil {
+			log.Printf("Error opening log file for following: %v", err)
+			continue
+		}
+
+		info, err := file.Stat()
+		if err != nil {
+			file.Close()
+			log.Printf("Error stating log file: %v", err)
+			continue
+		}
+
+		currentSize := info.Size()
+
+		// Check for file truncation/rotation
+		if currentSize < lastOffset {
+			log.Println("Log file truncated or rotated, reloading from start")
+			logMutex.Lock()
+			file.Close()
+			if err := loadFile(path); err != nil {
+				log.Printf("Error reloading file: %v", err)
+			}
+			logMutex.Unlock()
+			continue
+		}
+
+		// No new data
+		if currentSize == lastOffset {
+			file.Close()
+			continue
+		}
+
+		// Seek to last known position
+		if _, err := file.Seek(lastOffset, io.SeekStart); err != nil {
+			file.Close()
+			log.Printf("Error seeking in log file: %v", err)
+			continue
+		}
+
+		scanner := bufio.NewScanner(file)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 5*1024*1024)
+
+		newLines := make([]string, 0)
+		newMeta := make([]LogMeta, 0)
+
+		// Handle partial line from previous read
+		firstLine := true
+		for scanner.Scan() {
+			text := scanner.Text()
+
+			// If we had a partial line, prepend it to the first complete line
+			if firstLine && partialLine != "" {
+				text = partialLine + text
+				partialLine = ""
+			}
+			firstLine = false
+
+			newLines = append(newLines, text)
+
+			var meta LogMeta
+			_ = json.Unmarshal([]byte(text), &meta)
+			newMeta = append(newMeta, meta)
+		}
+
+		// Check if the last line was incomplete (no newline at EOF)
+		// We'll buffer it until next read
+		currentPos, _ := file.Seek(0, io.SeekCurrent)
+		if currentPos < currentSize {
+			// There's more data, but scanner stopped (likely no newline)
+			// The last "line" we got might be incomplete
+			if len(newLines) > 0 {
+				partialLine = newLines[len(newLines)-1]
+				newLines = newLines[:len(newLines)-1]
+				newMeta = newMeta[:len(newMeta)-1]
+			}
+		}
+
+		lastOffset = currentPos
+		file.Close()
+
+		if len(newLines) > 0 {
+			logMutex.Lock()
+			rawLines = append(rawLines, newLines...)
+			metaData = append(metaData, newMeta...)
+			logMutex.Unlock()
+			log.Printf("Added %d new log lines (total: %d)", len(newLines), len(rawLines))
+		}
+
+		if err := scanner.Err(); err != nil {
+			log.Printf("Error scanning log file: %v", err)
+		}
+	}
 }
 
 func loadFile(path string) error {
@@ -111,10 +242,156 @@ func loadFile(path string) error {
 		_ = json.Unmarshal([]byte(text), &meta)
 		metaData = append(metaData, meta)
 	}
-	return scanner.Err()
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// Track file offset for follow mode
+	if followMode {
+		if info, err := file.Stat(); err == nil {
+			lastOffset = info.Size()
+		}
+	}
+
+	return nil
+}
+
+func handleLogs(w http.ResponseWriter, r *http.Request) {
+	logMutex.RLock()
+	defer logMutex.RUnlock()
+
+	offset := 0
+	limit := 100
+	datastore := r.URL.Query().Get("datastore")
+
+	if o := r.URL.Query().Get("offset"); o != "" {
+		fmt.Sscanf(o, "%d", &offset)
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+
+	filteredIndices := make([]int, 0)
+	for i, m := range metaData {
+		if datastore == "" || m.DatastoreName == datastore {
+			filteredIndices = append(filteredIndices, i)
+		}
+	}
+
+	if offset >= len(filteredIndices) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"logs":  make([]LogLine, 0),
+			"total": len(filteredIndices),
+		})
+		return
+	}
+
+	end := offset + limit
+	if end > len(filteredIndices) {
+		end = len(filteredIndices)
+	}
+
+	resultIndices := filteredIndices[offset:end]
+	logs := make([]LogLine, 0, len(resultIndices))
+
+	for _, idx := range resultIndices {
+		var line LogLine
+		if err := json.Unmarshal([]byte(rawLines[idx]), &line); err != nil {
+			log.Printf("Failed to parse line %d: %v", idx, err)
+			continue
+		}
+		logs = append(logs, line)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"logs":  logs,
+		"total": len(filteredIndices),
+	})
+}
+
+func handleFindOffset(w http.ResponseWriter, r *http.Request) {
+	logMutex.RLock()
+	defer logMutex.RUnlock()
+
+	targetTime := r.URL.Query().Get("time")
+	datastore := r.URL.Query().Get("datastore")
+
+	if targetTime == "" {
+		http.Error(w, "Missing time parameter", http.StatusBadRequest)
+		return
+	}
+
+	filteredIndices := make([]int, 0)
+	for i, m := range metaData {
+		if datastore == "" || m.DatastoreName == datastore {
+			filteredIndices = append(filteredIndices, i)
+		}
+	}
+
+	foundIdx := -1
+	for i, globalIdx := range filteredIndices {
+		if metaData[globalIdx].Time >= targetTime {
+			foundIdx = i
+			break
+		}
+	}
+
+	if foundIdx == -1 {
+		foundIdx = len(filteredIndices) - 1
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"offset": foundIdx,
+	})
+}
+
+func handleSearch(w http.ResponseWriter, r *http.Request) {
+	logMutex.RLock()
+	defer logMutex.RUnlock()
+
+	query := r.URL.Query().Get("q")
+	datastore := r.URL.Query().Get("datastore")
+
+	if query == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"matches": make([]int, 0),
+			"total":   0,
+		})
+		return
+	}
+
+	queryLower := strings.ToLower(query)
+
+	filteredIndices := make([]int, 0)
+	for i, m := range metaData {
+		if datastore == "" || m.DatastoreName == datastore {
+			filteredIndices = append(filteredIndices, i)
+		}
+	}
+
+	matches := make([]int, 0)
+	for filteredIdx, globalIdx := range filteredIndices {
+		if strings.Contains(strings.ToLower(rawLines[globalIdx]), queryLower) {
+			matches = append(matches, filteredIdx)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"matches": matches,
+		"total":   len(matches),
+	})
 }
 
 func handleDatastores(w http.ResponseWriter, r *http.Request) {
+	logMutex.RLock()
+	defer logMutex.RUnlock()
+
 	set := make(map[string]bool)
 	for _, m := range metaData {
 		if m.DatastoreName != "" {
@@ -131,245 +408,135 @@ func handleDatastores(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
-func handleFindOffset(w http.ResponseWriter, r *http.Request) {
-	targetTime := r.URL.Query().Get("time")
-	datastore := r.URL.Query().Get("datastore")
-
-	// Normalize input time (e.g. 8:20 -> 08:20)
-	if len(targetTime) > 0 && targetTime[0] != '0' && strings.Contains(targetTime, ":") {
-		parts := strings.Split(targetTime, ":")
-		if len(parts) > 0 && len(parts[0]) == 1 {
-			targetTime = "0" + targetTime
-		}
-	}
-
-	count := 0
-	foundOffset := -1
-
-	for _, meta := range metaData {
-		if datastore != "" && meta.DatastoreName != datastore {
-			continue
-		}
-
-		tVal := meta.Time
-		if tVal != "" {
-			// Extract time from ISO string "2006-01-02T15:04:05..."
-			// We split by T and take the second part
-			if idx := strings.Index(tVal, "T"); idx != -1 {
-				timePart := tVal[idx+1:]
-				// If valid part, compare
-				// We compare prefix length to support "15:39" vs "15:39:47.123"
-				compareLen := len(targetTime)
-				if len(timePart) >= compareLen {
-					if timePart[:compareLen] >= targetTime {
-						foundOffset = count
-						break
-					}
-				} else {
-					// Time in log is shorter than target? Rare but compare directly
-					if timePart >= targetTime {
-						foundOffset = count
-						break
-					}
-				}
-			}
-		}
-		count++
-	}
-
-	if foundOffset == -1 {
-		// Not found, default to end? Or 0?
-		// Let's return 0 if nothing found so user sees something, or handle in frontend
-		// Usually if time > all logs, we probably want to show the End.
-		// If we return count (which is total filtered items), we show nothing (empty).
-		foundOffset = count
-	}
-
+func handleViewState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]int{"offset": foundOffset})
+
+	switch r.Method {
+	case http.MethodGet:
+		state, err := loadViewState()
+		if err != nil {
+			http.Error(w, "Failed to load view state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(state)
+	case http.MethodPost:
+		var st ViewState
+		// Handle both application/json and beacon requests
+		if err := json.NewDecoder(r.Body).Decode(&st); err != nil {
+			http.Error(w, "Invalid view state payload", http.StatusBadRequest)
+			return
+		}
+		if st.Offset < 0 {
+			st.Offset = 0
+		}
+		if err := saveViewState(st); err != nil {
+			http.Error(w, "Failed to save view state: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
-func handleLogs(w http.ResponseWriter, r *http.Request) {
-	// Query params: offset, limit, datastore
-	offset := 0
-	limit := 100
-	datastore := r.URL.Query().Get("datastore")
-
-	if o := r.URL.Query().Get("offset"); o != "" {
-		fmt.Sscanf(o, "%d", &offset)
+func loadViewState() (ViewState, error) {
+	var st ViewState
+	if stateFile == "" {
+		return st, fmt.Errorf("state file path not set")
 	}
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return st, nil
+		}
+		return st, err
 	}
-
-	if limit > 1000 {
-		limit = 1000
+	if len(data) == 0 {
+		return st, nil
 	}
-
-	var result []LogLine = make([]LogLine, 0) // Initialize as empty slice, not nil
-
-	// Filtering and Paginating
-	// If datastore is empty, we just slice rawLines
-	// If datastore is present, we must scan metaData to find matching indices
-
-	count := 0
-	skipped := 0
-
-	for i, meta := range metaData {
-		if datastore != "" && meta.DatastoreName != datastore {
-			continue
-		}
-
-		// Valid match - check if we should skip or collect
-		if skipped < offset {
-			skipped++
-			continue
-		}
-
-		// We've skipped enough, now collect results
-		if count >= limit {
-			break
-		}
-
-		// Parse full line
-		var line LogLine
-		if err := json.Unmarshal([]byte(rawLines[i]), &line); err == nil {
-			result = append(result, line)
-		} else {
-			result = append(result, LogLine{"raw": rawLines[i]})
-		}
-		count++
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, err
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	return st, nil
 }
 
-type DecodeRequest struct {
-	Value string `json:"value"`
+func saveViewState(st ViewState) error {
+	if stateFile == "" {
+		return fmt.Errorf("state file path not set")
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(stateFile, data, 0644)
 }
 
 func handleDecode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
+	var req struct {
+		Value string `json:"value"`
 	}
-
-	var req DecodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	decodedBytes, err := base64.StdEncoding.DecodeString(req.Value)
+	decoded, err := decodeTypedValue(req.Value)
 	if err != nil {
-		http.Error(w, "Failed to base64 decode: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-
-	tv := &sdcpb.TypedValue{}
-	if err := proto.Unmarshal(decodedBytes, tv); err != nil {
-		http.Error(w, "Failed to unmarshal as TypedValue: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	marshaller := protojson.MarshalOptions{Multiline: true, EmitUnpopulated: false}
-	jsonBytes, err := marshaller.Marshal(tv)
-	if err != nil {
-		http.Error(w, "Failed to marshal to JSON: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(jsonBytes)
-}
-
-func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var values []string
-	if err := json.NewDecoder(r.Body).Decode(&values); err != nil {
-		http.Error(w, "Invalid request body (expected array of strings)", http.StatusBadRequest)
-		return
-	}
-
-	results := make([]interface{}, len(values))
-	// Reuse the marshaller
-	marshaller := protojson.MarshalOptions{Multiline: true, EmitUnpopulated: false}
-
-	for i, v := range values {
-		// Prepare a result object for this item
-		res := make(map[string]interface{})
-
-		decodedBytes, err := base64.StdEncoding.DecodeString(v)
-		if err != nil {
-			res["error"] = "Base64 error: " + err.Error()
-			results[i] = res
-			continue
-		}
-
-		tv := &sdcpb.TypedValue{}
-		if err := proto.Unmarshal(decodedBytes, tv); err != nil {
-			res["error"] = "Proto error: " + err.Error()
-			results[i] = res
-			continue
-		}
-
-		jsonBytes, err := marshaller.Marshal(tv)
-		if err != nil {
-			res["error"] = "JSON error: " + err.Error()
-			results[i] = res
-			continue
-		}
-
-		// Unmarshal back to interface{} to embed in the larger JSON response properly
-		var jsonVal interface{}
-		if err := json.Unmarshal(jsonBytes, &jsonVal); err != nil {
-			res["error"] = "Re-unmarshal error: " + err.Error() // Should not happen
-			results[i] = res
-		} else {
-			results[i] = jsonVal
-		}
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(results)
-}
-func handleSearch(w http.ResponseWriter, r *http.Request) {
-	query := strings.ToLower(r.URL.Query().Get("q"))
-	datastore := r.URL.Query().Get("datastore")
-
-	if query == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"matches": []int{},
-			"count":   0,
-		})
-		return
-	}
-
-	var matches []int
-
-	// Count filtered logs for match offset calculation
-	count := 0
-	for i, meta := range metaData {
-		if datastore != "" && meta.DatastoreName != datastore {
-			continue
-		}
-
-		// Search in the log line (case-insensitive)
-		if strings.Contains(strings.ToLower(rawLines[i]), query) {
-			matches = append(matches, count)
-		}
-		count++
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"matches": matches,
-		"count":   count,
+		"decoded": decoded,
 	})
+}
+
+func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Values []string `json:"values"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	results := make([]interface{}, len(req.Values))
+	for i, val := range req.Values {
+		decoded, err := decodeTypedValue(val)
+		if err != nil {
+			results[i] = map[string]interface{}{"error": err.Error()}
+		} else {
+			results[i] = decoded
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"decoded": results,
+	})
+}
+
+func decodeTypedValue(encodedVal string) (interface{}, error) {
+	data, err := base64.StdEncoding.DecodeString(encodedVal)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode error: %w", err)
+	}
+
+	var tv sdcpb.TypedValue
+	if err := proto.Unmarshal(data, &tv); err != nil {
+		return nil, fmt.Errorf("protobuf unmarshal error: %w", err)
+	}
+
+	jsonBytes, err := protojson.Marshal(&tv)
+	if err != nil {
+		return nil, fmt.Errorf("json marshal error: %w", err)
+	}
+
+	var result interface{}
+	if err := json.Unmarshal(jsonBytes, &result); err != nil {
+		return nil, fmt.Errorf("json unmarshal error: %w", err)
+	}
+
+	return result, nil
 }

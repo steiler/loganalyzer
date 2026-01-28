@@ -38,10 +38,15 @@
     *   The system maintains continuity by loading sufficient context (buffers above and below) around the target match.
     *   Prev/next navigation wraps around at boundaries.
 *   **Search Interaction:**
-    *   **Double-Click:** Double-clicking text in a log entry automatically populates the search box with selected text and triggers server-side search. This action prevents the detail modal from opening.
-    *   **Keyboard Shortcut:** Pressing `Ctrl+Shift+F` or `Alt+S` in the overview (when modal is closed) inserts the current text selection into the main search input and triggers server-side search. Does not interfere with typing in input fields.
+    *   **Double-Click:** Double-clicking text in a log entry adds the selection as a highlight term (multi-term client-side highlights) and prevents the detail modal from opening. Search navigation remains independent.
+    *   **Keyboard Shortcut:** Pressing `Ctrl+Shift+F` or `Alt+S` in the overview (when modal is closed) adds the current selection as a highlight term without focusing the search input. Does not interfere with typing in input fields.
     *   **Clear Search:** A dedicated "Clear" button and the ESC key (when no modal is open) reset the search filter.
     *   **ESC Key:** Closes the modal if open; otherwise clears search highlights.
+
+*   **Client-Side Highlights (Multi-Term):**
+    *   Users can add multiple highlight terms via double-click, the selection shortcut, or a dedicated input + Add button; highlights do not alter the server-side search state.
+    *   Each term gets a color-coded badge with a swatch and remove control; clear-all resets both terms and color assignments.
+    *   Matching rows tint with the term's color (via CSS variables) while keeping server-side search navigation intact.
 
 ### 4. Presentation
 *   **Syntax Highlighting:** JSON in the modal is pretty-printed and syntax-highlighted (keys, strings, booleans, nulls).
@@ -98,9 +103,10 @@
 *   Decoding specific field patterns (`leafVariant`).
 *   Performance for files up to ~200MB+.
 *   **Search:** Server-side search for all logs with case-insensitive substring matching. Gap-filling when navigating to off-screen matches. Efficient handling of large datasets via index-based navigation.
+*   **View State Persistence:** Automatic saving and restoration of user interactions including highlights, marked rows, scroll position, and datastore filter.
+*   **Real-Time Log Tailing (Optional):** Poll-based following of appended lines via `-follow` flag with offset-based efficiency.
 
 **Out-of-Scope:**
-*   Real-time log tailing/streaming (file is loaded once at startup).
 *   Persistent storage (database).
 *   User authentication/authorization.
 *   Editing or replaying logs.
@@ -111,9 +117,26 @@
 *   **Hardcoded Fields:** The list of fields to recurse into (`content`, `updates`, etc.), exclude from the main view, and "interesting" message patterns are hardcoded in the frontend. Configuration could be externalized.
 *   **Ellipsis Positioning:** The ellipsis indicator is rendered via CSS `::after` pseudo-element on the content span, ensuring it appears immediately after text rather than at the row's right edge.
 
+## Real-Time Log Tailing (Follow Mode) ✅ IMPLEMENTED
+*   **Flag:** `-follow` enables real-time tailing when the log file is being written to.
+*   **Implementation:** Background polling (5-second interval) detects file size changes using `os.Stat()`.
+*   **Efficiency:** Uses offset-based reading via `f.Seek(lastOffset, io.SeekStart)` to read only appended data since last poll, not the entire file. No redundant re-reading of earlier content.
+*   **Partial Line Buffering:** Incomplete lines (without newline) are buffered internally and assembled when subsequent data arrives, preventing malformed JSON entries.
+*   **Truncation/Rotation:** If file size shrinks (detected truncation or log rotation), the entire file is reloaded to resync; normal append detection resumes afterward.
+*   **Concurrency:** New lines are appended under `sync.RWMutex` protection to ensure thread-safe concurrent access from HTTP handlers and the polling goroutine.
+*   **Frontend Integration:** The frontend implements continuous background polling (5-second interval matching backend) and provides smart scroll-aware user experience:
+    *   **Continuous Background Polling:** Polls `/api/logs` every 5 seconds regardless of scroll position to detect new entries in real-time
+    *   **Scroll-Position-Aware Behavior:** When new logs detected, UI automatically decides next action based on user's current position:
+        *   **At Bottom (within 500px):** Auto-loads new entries silently and appends without disrupting scroll position
+        *   **Scrolled Away:** Shows "N new logs available - Click to load" indicator in fixed bottom-right position
+    *   **Smart Indicator:** Auto-dismisses after 2 seconds with smooth fade animation; clicking it jumps to bottom, clears view, loads latest batch (recent `initialLimit` entries), and allows natural upward pagination
+    *   **Seamless Integration:** All existing features (search, jump-to-time, filters, highlights, pagination) work transparently with dynamically growing log counts from follow mode
+*   **Status:** Fully implemented backend (5-second polling, offset-based reads, mutex protection, rotation handling) with intelligent frontend polling decoupled from scroll events and smooth UX for seamless real-time log following.
+
 ## Recent UX Improvements (Session Notes)
 
-*   **Selection-to-Search Workflow:** Users can now quickly search for text by double-clicking (fills search box) or using `Ctrl+Shift+F`/`Alt+S` keyboard shortcuts when text is selected in the overview.
+*   **Selection-to-Highlight Workflow:** Users can now add highlights by double-clicking text or using `Ctrl+Shift+F`/`Alt+S` on a selection; highlights are independent of server search navigation.
+*   **Highlight Badges & Colors:** Multi-term highlights render as color-coded badges with swatches and per-row tinting; terms can be added via a dedicated input + Add button or cleared individually/all at once. Color assignment is consistent per term and resets on clear-all.
 *   **Visual Consistency:** Ellipsis indicators (⋯) for expandable entries now appear directly after content text (via CSS pseudo-element on content span), improving scannability and positioning at the right point in the line.
 *   **jsonVal Decoding:** Base64-encoded JSON in `jsonVal` fields is now decoded client-side, parsed, and displayed as structured data under `jsonVal_decoded` in the modal for immediate visibility and pretty-printing.
 *   **Modal Horizontal Scrolling:** Long lines in the modal now support horizontal scrolling instead of wrapping, preserving formatting and enabling inspection of complete values.
@@ -125,6 +148,8 @@
 *   **Copy Fidelity:** Modal copy outputs the formatted, indented view that matches the on-screen presentation rather than raw JSON.
 *   **Keyboard Navigation:** ESC key intelligently closes modal or clears search depending on context; Enter/Shift+Enter navigate overview search results or modal search results.
 *   **Multi-Platform Releases:** GoReleaser configuration (`goreleaser.yaml`) enables automated builds and releases for Windows 64-bit, Linux (amd64 and arm64), and macOS (amd64 and arm64) with appropriate archive formats (.zip for Windows, .tar.gz for others).
+*   **View State Persistence:** View state is automatically saved to a `.viewstate.json` file adjacent to the log file (e.g., `sample.log.viewstate.json`), persisting highlights with colors, manually marked rows (tracked by global log index), scroll position (first visible entry index), and datastore filter. Changes trigger debounced saves with 1-second delay during normal interaction, while page close/tab switch use the Beacon API for reliable immediate saves. On reload, all state is restored including first visible log position and all manual annotations.
+*   **Real-Time Tailing with Offset-Based Efficiency:** Backend now supports optional follow mode via `-follow` flag. New lines are appended to in-memory slices under `sync.RWMutex` protection. Polling interval is 5 seconds with offset-based reads (no re-reading of entire file), and automatic recovery from file rotation/truncation.
 
 
 Treat this file as the authoritative source of truth.
