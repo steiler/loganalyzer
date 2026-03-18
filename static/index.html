@@ -1688,18 +1688,26 @@
                  const res = await fetch('/api/decode/batch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(values)
+                    body: JSON.stringify({ values })
                  });
                  
                  if (!res.ok) throw new Error(await res.text());
                  
-                 const results = await res.json();
+                 const payload = await res.json();
+                 const results = Array.isArray(payload)
+                    ? payload
+                    : (Array.isArray(payload?.decoded) ? payload.decoded : []);
                  
                  // Apply results back to objects
                  for (let i = 0; i < targets.length; i++) {
                      const result = results[i];
                      const target = targets[i];
                      
+                     if (typeof result === 'undefined') {
+                         target['leafVariant_error'] = 'Batch decode returned incomplete results';
+                         continue;
+                     }
+
                      // Check if result indicates error (our backend logic returns {error: "..."} on failure)
                      // But valid result is also an object. 
                      // Valid TypedValue JSON usually has keys like 'string_val', 'int_val', etc.
