@@ -48,6 +48,7 @@
     *   Users can add multiple highlight terms via double-click, the selection shortcut, or a dedicated input + Add button; highlights do not alter the server-side search state.
     *   Each term gets a color-coded badge with a swatch and remove control; clear-all resets both terms and color assignments.
     *   Matching rows tint with the term's color (via CSS variables) while keeping server-side search navigation intact.
+*   **Help / Usage Modal:** A dedicated Help button opens a modal documenting supported keyboard shortcuts and usage patterns; `?` opens help when not typing in an input.
 
 ### 4. Presentation
 *   **Syntax Highlighting:** JSON in the modal is pretty-printed and syntax-highlighted (keys, strings, booleans, nulls).
@@ -148,6 +149,7 @@
     *   **Behavior:** Active match is highlighted and scrolled into view; navigation wraps around at boundaries.
 *   **Copy Fidelity:** Modal copy outputs the formatted, indented view that matches the on-screen presentation rather than raw JSON.
 *   **Keyboard Navigation:** ESC key intelligently closes modal or clears search depending on context; Enter/Shift+Enter navigate overview search results or modal search results.
+*   **Keyboard Shortcut Discoverability:** Added Help/Usage modal with shortcut table (overview and modal search navigation, highlight shortcuts, and ESC behavior), accessible via toolbar Help button and `?`.
 *   **Multi-Platform Releases:** GoReleaser configuration (`goreleaser.yaml`) enables automated builds and releases for Windows 64-bit, Linux (amd64 and arm64), and macOS (amd64 and arm64) with appropriate archive formats (.zip for Windows, .tar.gz for others).
 *   **View State Persistence:** View state is automatically saved to a `.viewstate.json` file adjacent to the log file (e.g., `sample.log.viewstate.json`), persisting highlights with colors, manually marked rows (tracked by global log index), scroll position (first visible entry index), and datastore filter. Changes trigger debounced saves with 1-second delay during normal interaction, while page close/tab switch use the Beacon API for reliable immediate saves. On reload, all state is restored including first visible log position and all manual annotations.
 *   **Real-Time Tailing with Offset-Based Efficiency:** Backend now supports optional follow mode via `-follow` flag. New lines are appended to in-memory slices under `sync.RWMutex` protection. Polling interval is 5 seconds with offset-based reads (no re-reading of entire file), and automatic recovery from file rotation/truncation.

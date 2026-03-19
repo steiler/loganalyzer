@@ -39,7 +39,14 @@
         /* Modal styles */
         .modal { display: none; position: fixed; z-index: 20; left: 0; top: 0; width: 100%; height: 100%; overflow: hidden; background-color: rgba(0,0,0,0.4); }
         .modal-content { background-color: #fefefe; margin: 2vh auto; width: 90%; height: 96vh; display: flex; flex-direction: column; position: relative; border: 1px solid #888; box-sizing: border-box; border-radius: 4px; overflow: hidden; }
+        .help-modal-content { background-color: #fefefe; margin: 8vh auto; width: min(900px, 92%); max-height: 84vh; display: flex; flex-direction: column; border: 1px solid #888; box-sizing: border-box; border-radius: 4px; overflow: hidden; }
         .modal-header { padding: 10px 20px; border-bottom: 1px solid #ddd; background: #fefefe; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+        .help-body { padding: 14px 18px; overflow: auto; }
+        .help-body h3 { margin: 0 0 10px 0; }
+        .help-body table { width: 100%; border-collapse: collapse; font-size: 0.95em; }
+        .help-body th, .help-body td { border: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+        .help-body th { background: #f6f6f6; }
+        .kbd { display: inline-block; padding: 1px 6px; border: 1px solid #bbb; border-bottom-width: 2px; border-radius: 4px; background: #fafafa; font-family: monospace; font-size: 0.95em; }
         .close { color: #aaa; font-size: 28px; font-weight: bold; cursor: pointer; margin-left: auto; }
         .close:hover, .close:focus { color: black; text-decoration: none; }
         .json-key { color: brown; }
@@ -154,6 +161,7 @@
         <button id="search-prev" title="Previous match" style="margin-left: 5px;">▲</button>
         <button id="search-next" title="Next match">▼</button>
         <button onclick="clearSearch()" style="margin-left: 5px;">Clear</button>
+        <button id="help-open" style="margin-left: 5px;" title="Show keyboard shortcuts">Help</button>
         <span id="search-stats" style="font-size: 0.9em; color: #666; margin-left: 10px;"></span>
         <div style="margin-top: 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
             <label>Highlights:</label>
@@ -176,6 +184,72 @@
                 <span class="close">&times;</span>
             </div>
             <pre id="modal-text"></pre>
+        </div>
+    </div>
+
+    <div id="help-modal" class="modal" aria-hidden="true">
+        <div class="help-modal-content" role="dialog" aria-labelledby="help-title" aria-modal="true">
+            <div class="modal-header">
+                <strong id="help-title">Help / Keyboard Shortcuts</strong>
+                <span id="help-close" class="close" title="Close">&times;</span>
+            </div>
+            <div class="help-body">
+                <h3>Overview</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Shortcut</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="kbd">Enter</span> in Search input</td>
+                            <td>Go to next search match</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">Shift</span> + <span class="kbd">Enter</span> in Search input</td>
+                            <td>Go to previous search match</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">Ctrl</span> + <span class="kbd">Shift</span> + <span class="kbd">F</span></td>
+                            <td>Add current text selection as a highlight term (overview only)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">Alt</span> + <span class="kbd">S</span></td>
+                            <td>Add current text selection as a highlight term (overview only)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">?</span></td>
+                            <td>Open this help modal (when not typing in inputs)</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">Esc</span></td>
+                            <td>Close detail/help modal if open; otherwise clear overview search</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <h3 style="margin-top: 16px;">Detail Modal</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Shortcut</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><span class="kbd">Enter</span> in modal search</td>
+                            <td>Go to next in-modal match</td>
+                        </tr>
+                        <tr>
+                            <td><span class="kbd">Shift</span> + <span class="kbd">Enter</span> in modal search</td>
+                            <td>Go to previous in-modal match</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </div>
 
@@ -1796,22 +1870,57 @@
 
         // Modal close logic
         const modal = document.getElementById("myModal");
+        const helpModal = document.getElementById("help-modal");
         const span = document.getElementsByClassName("close")[0];
+        const helpClose = document.getElementById("help-close");
+        const helpOpen = document.getElementById("help-open");
         const closeModal = function() { 
             modal.style.display = "none";
             document.body.classList.remove('modal-open');
         }
+        const closeHelpModal = function() {
+            helpModal.style.display = "none";
+            helpModal.setAttribute('aria-hidden', 'true');
+            if (modal.style.display !== "block") {
+                document.body.classList.remove('modal-open');
+            }
+        }
+        const openHelpModal = function() {
+            helpModal.style.display = "block";
+            helpModal.setAttribute('aria-hidden', 'false');
+            document.body.classList.add('modal-open');
+        }
         span.onclick = closeModal;
+        helpClose.onclick = closeHelpModal;
+        helpOpen.onclick = openHelpModal;
         window.onclick = function(event) {
             if (event.target == modal) { closeModal(); }
+            if (event.target == helpModal) { closeHelpModal(); }
         }
         document.addEventListener('keydown', function(event) {
             if (event.key === "Escape") {
                 if (modal.style.display === "block") {
                     closeModal();
+                } else if (helpModal.style.display === "block") {
+                    closeHelpModal();
                 } else {
                     clearSearch();
                 }
+            }
+        });
+
+        document.addEventListener('keydown', function(event) {
+            const modalVisible = modal.style.display === 'block';
+            const helpVisible = helpModal.style.display === 'block';
+            if (modalVisible || helpVisible) return;
+
+            const active = document.activeElement;
+            if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable)) return;
+
+            if (event.key === '?') {
+                openHelpModal();
+                event.preventDefault();
+                event.stopPropagation();
             }
         });
 
