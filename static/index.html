@@ -147,6 +147,7 @@
         <label for="time-input" style="margin-left: 20px;">Jump to Time:</label>
         <input type="text" id="time-input" placeholder="HH:MM:SS" size="10" onkeydown="if(event.key === 'Enter') jumpToTime()">
         <button onclick="jumpToTime()">Go</button>
+        <button id="jump-latest" onclick="jumpToLatest()" title="Jump to newest log entries">Latest</button>
 
         <label for="search-input" style="margin-left: 20px;">Search:</label>
         <input type="text" id="search-input" placeholder="Find and navigate...">
@@ -204,6 +205,7 @@
         let markedIndices = new Set();
         let stateSaveTimeout = null;
         let restoredOffset = 0;
+        let lastGeneration = -1; // Track log file generation for truncation detection
         
         // Follow mode state
         let totalLogCount = 0;
@@ -233,6 +235,23 @@
                 const data = await response.json();
                 const newLogs = data.logs || data; // Handle both {logs: [], total: N} and legacy array format
                 const total = data.total !== undefined ? data.total : null;
+                
+                // Detect file truncation via generation change
+                if (data.generation !== undefined) {
+                    if (lastGeneration !== -1 && data.generation !== lastGeneration) {
+                        console.log("Log file truncation detected, resetting view state");
+                        // Truncation detected - reset all view state since offsets are now invalid
+                        currentOffset = 0;
+                        topOffset = 0;
+                        hasMore = true;
+                        markedIndices.clear();
+                        document.getElementById('logs-container').innerHTML = '';
+                        lastKnownTotal = 0;
+                        searchMatchIndex = -1;
+                        serverSearchMatches = [];
+                    }
+                    lastGeneration = data.generation;
+                }
                 
                 if (total !== null) {
                     totalLogCount = total;
@@ -346,16 +365,36 @@
         }
 
         async function loadNewLogs() {
-            lastKnownTotal = totalLogCount; // Mark as read when user clicks
-            hasMore = true;
-            // Jump to the end - load latest entries
-            // Start from max(0, totalLogCount - initialLimit) to show recent entries
-            const startOffset = Math.max(0, totalLogCount - initialLimit);
-            await fetchLogs(true, startOffset);
-            // Scroll to bottom after loading
-            setTimeout(() => {
-                window.scrollTo(0, document.body.scrollHeight);
-            }, 100);
+            await jumpToLatest();
+        }
+
+        async function jumpToLatest() {
+            if (isLoading) return;
+
+            try {
+                // Refresh total so jump always targets the current end of filtered logs.
+                const response = await fetch(`/api/logs?offset=0&limit=1&datastore=${encodeURIComponent(currentFilter)}`);
+                const data = await response.json();
+                const total = data.total !== undefined ? data.total : null;
+
+                if (total !== null) {
+                    totalLogCount = total;
+                }
+
+                hasMore = true;
+                const startOffset = Math.max(0, totalLogCount - initialLimit);
+                await fetchLogs(true, startOffset);
+                lastKnownTotal = totalLogCount;
+
+                const indicator = document.getElementById('new-logs-indicator');
+                if (indicator) indicator.remove();
+
+                setTimeout(() => {
+                    window.scrollTo(0, document.body.scrollHeight);
+                }, 100);
+            } catch (e) {
+                console.error('Jump to latest error:', e);
+            }
         }
 
         async function pollForNewLogs() {
@@ -365,6 +404,24 @@
                 const response = await fetch(`/api/logs?offset=0&limit=1&datastore=${encodeURIComponent(currentFilter)}`);
                 const data = await response.json();
                 const total = data.total !== undefined ? data.total : null;
+                
+                // Detect file truncation via generation change during polling
+                if (data.generation !== undefined) {
+                    if (lastGeneration !== -1 && data.generation !== lastGeneration) {
+                        console.log("Truncation detected during polling, triggering full reset");
+                        // Truncation detected - reset view and reload
+                        currentOffset = 0;
+                        topOffset = 0;
+                        hasMore = true;
+                        markedIndices.clear();
+                        document.getElementById('logs-container').innerHTML = '';
+                        lastKnownTotal = 0;
+                        searchMatchIndex = -1;
+                        serverSearchMatches = [];
+                        await fetchLogs(true, 0);
+                    }
+                    lastGeneration = data.generation;
+                }
                 
                 if (total !== null && total !== totalLogCount) {
                     totalLogCount = total;
@@ -504,6 +561,7 @@
             
             filterSelect.onchange = (e) => {
                 currentFilter = e.target.value;
+                lastKnownTotal = 0; // Reset so new count is calculated correctly for the new filter
                 fetchLogs(true);
                 debounceSaveViewState();
             };

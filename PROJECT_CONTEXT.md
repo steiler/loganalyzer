@@ -31,6 +31,7 @@
 ### 3. Filtering and Navigation
 *   **Datastore Filtering:** A dropdown allows filtering logs by `datastore-name`.
 *   **Time Jump:** Users can jump to a specific timestamp (supporting `HH:MM:SS` and `H:MM` formats). The system locates the nearest log entry and updates the view.
+*   **Jump to Latest:** A dedicated control jumps directly to the newest log entries in the current datastore-filtered view and scrolls to the latest row.
 *   **Bidirectional Infinite Scrolling:** The frontend supports scrolling both down (to load newer logs) and up (to load older logs). When jumping to a specific time, previous logs are pre-fetched to allow immediate upward scrolling.
 *   **Server-Side Search:** Search queries are executed on the backend, which scans all log lines against the query (case-insensitive substring matching) and returns global match indices relative to the filtered dataset. This enables searching across logs not yet loaded on the frontend.
 *   **Search Navigation with Gap-Filling:**
@@ -133,7 +134,7 @@
     *   **Seamless Integration:** All existing features (search, jump-to-time, filters, highlights, pagination) work transparently with dynamically growing log counts from follow mode
 *   **Status:** Fully implemented backend (5-second polling, offset-based reads, mutex protection, rotation handling) with intelligent frontend polling decoupled from scroll events and smooth UX for seamless real-time log following.
 
-## Recent UX Improvements (Session Notes)
+## Recent UX Improvements & Bug Fixes
 
 *   **Selection-to-Highlight Workflow:** Users can now add highlights by double-clicking text or using `Ctrl+Shift+F`/`Alt+S` on a selection; highlights are independent of server search navigation.
 *   **Highlight Badges & Colors:** Multi-term highlights render as color-coded badges with swatches and per-row tinting; terms can be added via a dedicated input + Add button or cleared individually/all at once. Color assignment is consistent per term and resets on clear-all.
@@ -150,6 +151,10 @@
 *   **Multi-Platform Releases:** GoReleaser configuration (`goreleaser.yaml`) enables automated builds and releases for Windows 64-bit, Linux (amd64 and arm64), and macOS (amd64 and arm64) with appropriate archive formats (.zip for Windows, .tar.gz for others).
 *   **View State Persistence:** View state is automatically saved to a `.viewstate.json` file adjacent to the log file (e.g., `sample.log.viewstate.json`), persisting highlights with colors, manually marked rows (tracked by global log index), scroll position (first visible entry index), and datastore filter. Changes trigger debounced saves with 1-second delay during normal interaction, while page close/tab switch use the Beacon API for reliable immediate saves. On reload, all state is restored including first visible log position and all manual annotations.
 *   **Real-Time Tailing with Offset-Based Efficiency:** Backend now supports optional follow mode via `-follow` flag. New lines are appended to in-memory slices under `sync.RWMutex` protection. Polling interval is 5 seconds with offset-based reads (no re-reading of entire file), and automatic recovery from file rotation/truncation.
+*   **Batch Decode Contract Fix:** Frontend request payload and response handling corrected to match Go handler expectations; `/api/decode/batch` now properly sends `{"values": [...]}` and reads responses with optional wrapping.
+*   **Jump to Latest Button:** Added dedicated "Latest" control to jump directly to newest log entries in the current datastore-filtered view, with auto-scroll to the latest row.
+*   **Truncation Detection & Recovery:** Backend tracks file generation (incremented on truncation) and includes it in API responses. Frontend detects generation changes during both polling and fetch operations, automatically resets all stale state (offsets, marked indices, search filters), and refreshes the UI with the reloaded file's data.
+*   **Filter-Aware New-Logs Indicator:** The "N new logs available" popup now correctly reflects only new logs from the currently active datastore filter by resetting the baseline when the filter changes.
 
 
 Treat this file as the authoritative source of truth.

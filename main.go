@@ -36,6 +36,7 @@ var (
 	logMutex    sync.RWMutex
 	lastOffset  int64
 	partialLine string
+	generation  int // Incremented on file truncation/reload
 )
 
 type HighlightTerm struct {
@@ -124,6 +125,7 @@ func followLogFile(path string) {
 			if err := loadFile(path); err != nil {
 				log.Printf("Error reloading file: %v", err)
 			}
+			generation++ // Signal truncation to frontend
 			logMutex.Unlock()
 			continue
 		}
@@ -282,8 +284,9 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	if offset >= len(filteredIndices) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"logs":  make([]LogLine, 0),
-			"total": len(filteredIndices),
+			"logs":       make([]LogLine, 0),
+			"total":      len(filteredIndices),
+			"generation": generation,
 		})
 		return
 	}
@@ -307,8 +310,9 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"logs":  logs,
-		"total": len(filteredIndices),
+		"logs":       logs,
+		"total":      len(filteredIndices),
+		"generation": generation,
 	})
 }
 
