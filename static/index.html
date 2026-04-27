@@ -5,9 +5,15 @@
     <title>Log Analyzer</title>
     <style>
         body { font-family: monospace; margin: 0; padding: 10px; }
-        #logs-container { display: inline-block; min-width: 100%; }
+        #logs-container { display: inline-block; min-width: 100%; transition: opacity 160ms ease; }
+        #logs-container.list-refreshing { opacity: 0.78; }
+        #tail-bottom-buffer {
+            height: clamp(28px, 7vh, 72px);
+            pointer-events: none;
+            border-top: 1px solid #f3f3f3;
+        }
         #controls { position: sticky; top: 0; background-color: white; z-index: 10; padding: 10px 0; border-bottom: 1px solid #ccc; margin-bottom: 5px; }
-        .log-entry { padding: 0; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; display: flex; align-items: stretch; }
+        .log-entry { padding: 0; border-bottom: 1px solid #eee; white-space: nowrap; cursor: pointer; display: flex; align-items: stretch; position: relative; }
         .log-entry:hover { background-color: #f0f0f0; }
         .log-entry-gutter {
             width: 8px;
@@ -30,10 +36,40 @@
         .log-entry.active-entry { background-color: #ffe0b2; outline: 1px solid #ffcc80; }
         .log-entry.marked-entry { background-color: #d0f0c0; }
         .log-entry.error-level { background-color: #ffcccc; }
-        .highlight-badge { display: inline-flex; align-items: center; gap: 6px; background: var(--highlight-bg, #e3f2fd); border: 1px solid var(--highlight-border, #90caf9); border-radius: 3px; padding: 2px 8px; margin: 2px; font-size: 0.85em; cursor: pointer; color: #0d47a1; }
-        .highlight-badge:hover { background: #bbdefb; }
-        .highlight-badge .remove { margin-left: 2px; font-weight: bold; color: inherit; }
+        .log-entry.entering {
+            animation: logEntryFadeIn 220ms ease-out;
+            animation-fill-mode: both;
+            will-change: opacity;
+        }
+        .log-entry.append-boundary::before {
+            content: "";
+            position: absolute;
+            top: -1px;
+            left: 0;
+            right: 0;
+            height: 3px;
+            pointer-events: none;
+            background: rgba(120, 120, 120, 0.55);
+            animation: newBoundaryFade 1900ms ease-out forwards;
+        }
+        .log-entry.entering::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background: rgba(120, 120, 120, 0.18);
+            animation: newEntryFlash 1900ms ease-out forwards;
+        }
+        .highlight-badge { display: inline-flex; align-items: center; gap: 4px; background: var(--highlight-bg, #e3f2fd); border: 1px solid color-mix(in srgb, var(--highlight-border, #90caf9) 70%, #ffffff 30%); border-radius: 5px; padding: 2px 7px; margin: 1px; font-size: 0.82em; line-height: 1.2; cursor: pointer; color: #0d47a1; }
+        .highlight-badge:hover { background: color-mix(in srgb, var(--highlight-bg, #e3f2fd) 85%, #ffffff 15%); }
+        .highlight-badge .remove { margin-left: 1px; font-weight: bold; color: inherit; opacity: 0.8; }
         .highlight-badge .swatch { width: 10px; height: 10px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
+        .highlight-badge .swatch-input { width: 14px; height: 14px; border: 0; padding: 0; background: transparent; cursor: pointer; }
+        .highlight-badge .swatch-input::-webkit-color-swatch-wrapper { padding: 0; }
+        .highlight-badge .swatch-input::-webkit-color-swatch { border: 1px solid rgba(0,0,0,0.18); border-radius: 3px; }
+        .highlight-badge .swatch-input::-moz-color-swatch { border: 1px solid rgba(0,0,0,0.18); border-radius: 3px; }
+        .highlight-preview-badge { display: inline-flex; align-items: center; gap: 4px; border: 1px dashed #cdcdcd; border-radius: 5px; padding: 2px 7px; margin: 1px; font-size: 0.80em; line-height: 1.2; color: #666; background: #fcfcfc; }
+        .highlight-preview-badge .swatch { width: 8px; height: 8px; border-radius: 2px; border: 1px solid rgba(0,0,0,0.15); }
         .log-entry.highlight-match { background-color: var(--highlight-color, #ffffcc); }
         body.modal-open { overflow: hidden; }
         /* Modal styles */
@@ -135,6 +171,18 @@
             0% { opacity: 1; }
             100% { opacity: 0; }
         }
+        @keyframes logEntryFadeIn {
+            0% { opacity: 0; }
+            100% { opacity: 1; }
+        }
+        @keyframes newEntryFlash {
+            0% { opacity: 0.85; }
+            100% { opacity: 0; }
+        }
+        @keyframes newBoundaryFade {
+            0% { height: 3px; opacity: 1; }
+            100% { height: 1px; opacity: 0; }
+        }
         #new-logs-indicator.fade-out {
             animation: fadeOut 0.5s ease-out forwards;
         }
@@ -168,10 +216,12 @@
             <input type="text" id="highlight-input" placeholder="Add highlight term" size="18" aria-label="Add highlight term">
             <button id="highlight-add">Add</button>
             <button onclick="clearHighlights()">Clear All</button>
+            <span id="highlight-preview-container" style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;"></span>
             <span id="highlights-container" style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px;"></span>
         </div>
     </div>
     <div id="logs-container">Loading...</div>
+    <div id="tail-bottom-buffer" aria-hidden="true"></div>
 
     <div id="myModal" class="modal">
         <div class="modal-content">
@@ -280,29 +330,40 @@
         let stateSaveTimeout = null;
         let restoredOffset = 0;
         let lastGeneration = -1; // Track log file generation for truncation detection
+        let highlightPreviewTimeout = null;
         
         // Follow mode state
         let totalLogCount = 0;
         let lastKnownTotal = 0;
         let pollInterval = null;
+        let isTailFollowing = true;
+        let pendingJumpToLatest = false;
+        let lastScrollY = 0;
+        let detachedAutoLoaded = 0;
+        const FOLLOW_DETACH_THRESHOLD_PX = 180;
+        const FOLLOW_RESUME_THRESHOLD_PX = 40;
         
         // Modal state
         let currentModalData = null;
         let modalSearchMatches = [];
         let modalSearchIndex = -1;
 
-        async function fetchLogs(reset = false, startOffset = null) {
+        async function fetchLogs(reset = false, startOffset = null, fetchLimitOverride = null) {
             if (isLoading) return;
+            const container = document.getElementById('logs-container');
             if (reset) {
                 currentOffset = startOffset !== null ? startOffset : 0;
                 topOffset = currentOffset;
                 hasMore = true;
-                document.getElementById('logs-container').innerHTML = '';
+                if (container) {
+                    container.classList.add('list-refreshing');
+                    container.innerHTML = '';
+                }
             }
             if (!hasMore) return;
 
             isLoading = true;
-            const fetchLimit = currentOffset === 0 ? initialLimit : limit;
+            const fetchLimit = fetchLimitOverride !== null ? fetchLimitOverride : (currentOffset === 0 ? initialLimit : limit);
             
             try {
                 const response = await fetch(`/api/logs?offset=${currentOffset}&limit=${fetchLimit}&datastore=${encodeURIComponent(currentFilter)}`);
@@ -345,13 +406,24 @@
                 // If we haven't filled the screen yet, fetch more
                 if (document.body.scrollHeight <= window.innerHeight && hasMore) {
                      isLoading = false; // Reset to allow recursion
-                     await fetchLogs();
+                     await fetchLogs(false, null, fetchLimitOverride);
                 }
 
             } catch (e) {
                 console.error(e);
             } finally {
                 isLoading = false;
+                if (reset && container) {
+                    requestAnimationFrame(() => {
+                        container.classList.remove('list-refreshing');
+                    });
+                }
+                if (pendingJumpToLatest) {
+                    pendingJumpToLatest = false;
+                    setTimeout(() => {
+                        jumpToLatest();
+                    }, 0);
+                }
             }
         }
 
@@ -360,21 +432,87 @@
             debounceSaveViewState();
         }, { passive: true });
 
+        function getBottomBufferHeight() {
+            const buffer = document.getElementById('tail-bottom-buffer');
+            return buffer ? buffer.getBoundingClientRect().height : 0;
+        }
+
+        function rawDistanceFromPageBottom() {
+            return Math.max(0, document.body.scrollHeight - (window.innerHeight + window.scrollY));
+        }
+
+        function followZoneThreshold() {
+            // Keep follow active only in the lower half of the spacer (or a minimal resume zone).
+            return Math.max(FOLLOW_RESUME_THRESHOLD_PX, getBottomBufferHeight() * 0.5);
+        }
+
+        function distanceFromBottom() {
+            const rawDistance = rawDistanceFromPageBottom();
+            // Exclude intentional tail buffer so "near bottom" means near the last log entry.
+            return Math.max(0, rawDistance - getBottomBufferHeight());
+        }
+
+        function isInFollowZone() {
+            return rawDistanceFromPageBottom() <= followZoneThreshold();
+        }
+
+        function scrollToLatestEntry() {
+            // Keep Latest consistent with manual scrolling to the end, including the small bottom spacer.
+            const targetY = Math.max(0, document.body.scrollHeight - window.innerHeight);
+            window.scrollTo({ top: targetY, behavior: 'auto' });
+        }
+
+        function detachFollowMode() {
+            if (isTailFollowing) {
+                // Start a new detached buffering window.
+                detachedAutoLoaded = 0;
+            }
+            isTailFollowing = false;
+        }
+
+        function enableFollowMode() {
+            isTailFollowing = true;
+            detachedAutoLoaded = 0;
+        }
+
         function checkForNewLogs() {
             if (totalLogCount > lastKnownTotal) {
                 const newCount = totalLogCount - lastKnownTotal;
-                const nearBottom = (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 500;
-                // If user is at bottom, auto-load new logs silently
-                if (nearBottom) {
-                    loadNewLogsAuto();
+
+                // Following mode: aggressively fetch until caught up to the true end.
+                if (isTailFollowing && isInFollowZone()) {
+                    const fetchUntilCaughtUp = async () => {
+                        let loaded = 0;
+                        let toLoad = Math.min(totalLogCount - currentOffset, limit);
+                        while (currentOffset < totalLogCount && toLoad > 0) {
+                            const justLoaded = await loadNewLogsAuto(true, toLoad);
+                            loaded += justLoaded;
+                            toLoad = Math.min(totalLogCount - currentOffset, limit);
+                            // If nothing was loaded, break to avoid infinite loop on error
+                            if (justLoaded === 0) break;
+                        }
+                    };
+                    fetchUntilCaughtUp();
                 } else {
-                    // If scrolled away, show indicator
-                    showNewLogsIndicator(newCount);
+                    // Detached mode: auto-append up to one page, then pause and show queued count.
+                    const remainingDetachedBudget = Math.max(0, limit - detachedAutoLoaded);
+                    if (remainingDetachedBudget > 0) {
+                        const toLoad = Math.min(newCount, remainingDetachedBudget);
+                        loadNewLogsAuto(false, toLoad).then((loaded) => {
+                            detachedAutoLoaded += loaded;
+                            const queued = totalLogCount - lastKnownTotal;
+                            if (queued > 0 && detachedAutoLoaded >= limit) {
+                                showNewLogsIndicator(queued, true);
+                            }
+                        });
+                    } else {
+                        showNewLogsIndicator(newCount, true);
+                    }
                 }
             }
         }
 
-        function showNewLogsIndicator(count) {
+        function showNewLogsIndicator(count, sticky = false) {
             let indicator = document.getElementById('new-logs-indicator');
             if (!indicator) {
                 indicator = document.createElement('div');
@@ -382,6 +520,7 @@
                 indicator.style.cssText = 'position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; padding: 12px 20px; border-radius: 4px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 1000; font-family: monospace;';
                 indicator.onclick = () => {
                     if (indicator.dismissTimeout) clearTimeout(indicator.dismissTimeout);
+                    enableFollowMode();
                     loadNewLogs();
                     indicator.remove();
                 };
@@ -407,6 +546,11 @@
             indicator.classList.remove('fade-out');
             if (indicator.dismissTimeout) clearTimeout(indicator.dismissTimeout);
             indicator.textContent = `${count} new log${count > 1 ? 's' : ''} available - Click to load`;
+
+            if (sticky) {
+                return;
+            }
+
             indicator.dismissTimeout = setTimeout(() => {
                 indicator.classList.add('fade-out');
                 setTimeout(() => {
@@ -415,26 +559,33 @@
             }, 2000);
         }
 
-        async function loadNewLogsAuto() {
+        async function loadNewLogsAuto(keepFollowing = false, maxToLoad = 100) {
             // Auto-load new logs when user is at bottom - just append without scroll disruption
-            if (isLoading) return;
-            const newCount = totalLogCount - lastKnownTotal;
+            if (isLoading) return 0;
             
             try {
-                const response = await fetch(`/api/logs?offset=${currentOffset}&limit=100&datastore=${encodeURIComponent(currentFilter)}`);
+                const response = await fetch(`/api/logs?offset=${currentOffset}&limit=${maxToLoad}&datastore=${encodeURIComponent(currentFilter)}`);
                 const data = await response.json();
                 const newLogs = data.logs || data;
                 
                 if (newLogs.length > 0) {
-                    renderLogs(newLogs, false, currentOffset);
+                    renderLogs(newLogs, false, currentOffset, 'append');
                     currentOffset += newLogs.length;
                     lastKnownTotal = totalLogCount; // Only update after successful load
                     // Remove indicator since we auto-loaded
                     const indicator = document.getElementById('new-logs-indicator');
                     if (indicator) indicator.remove();
+
+                    if (keepFollowing) {
+                        setTimeout(() => {
+                            scrollToLatestEntry();
+                        }, 0);
+                    }
                 }
+                return newLogs.length;
             } catch (e) {
                 console.error('Auto-load error:', e);
+                return 0;
             }
         }
 
@@ -443,7 +594,14 @@
         }
 
         async function jumpToLatest() {
-            if (isLoading) return;
+            // Explicit user intent: resume follow mode whenever Latest is clicked.
+            enableFollowMode();
+            if (isLoading) {
+                pendingJumpToLatest = true;
+                // Provide immediate visual response while waiting for in-flight fetch.
+                scrollToLatestEntry();
+                return;
+            }
 
             try {
                 // Refresh total so jump always targets the current end of filtered logs.
@@ -457,14 +615,14 @@
 
                 hasMore = true;
                 const startOffset = Math.max(0, totalLogCount - initialLimit);
-                await fetchLogs(true, startOffset);
+                await fetchLogs(true, startOffset, initialLimit);
                 lastKnownTotal = totalLogCount;
 
                 const indicator = document.getElementById('new-logs-indicator');
                 if (indicator) indicator.remove();
 
                 setTimeout(() => {
-                    window.scrollTo(0, document.body.scrollHeight);
+                    scrollToLatestEntry();
                 }, 100);
             } catch (e) {
                 console.error('Jump to latest error:', e);
@@ -472,8 +630,6 @@
         }
 
         async function pollForNewLogs() {
-            if (!currentFilter) return;  // Remove isLoading check to allow polling regardless of current activity
-            
             try {
                 const response = await fetch(`/api/logs?offset=0&limit=1&datastore=${encodeURIComponent(currentFilter)}`);
                 const data = await response.json();
@@ -525,15 +681,28 @@
             
             // Always poll for new logs (independent of scroll position)
             startPolling();
+            lastScrollY = window.scrollY;
             
             // Track scroll position to determine auto-load vs indicator behavior
             window.addEventListener('scroll', () => {
-                const nearBottom = (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 500;
-                if (nearBottom && !pollInterval) {
-                    // Resume polling if scrolled near bottom
-                    startPolling();
+                const currentY = window.scrollY;
+                const scrollingUp = currentY < lastScrollY;
+                lastScrollY = currentY;
+
+                // Any explicit upward scrolling while following detaches follow mode.
+                if (scrollingUp && isTailFollowing) {
+                    detachFollowMode();
+                    return;
                 }
-                // Note: We don't stop polling anymore - it always runs in background
+
+                if (isInFollowZone()) {
+                    if (!isTailFollowing) {
+                        enableFollowMode();
+                        checkForNewLogs();
+                    }
+                } else {
+                    detachFollowMode();
+                }
             }, { passive: true });
             
             document.getElementById('search-input').addEventListener('input', (e) => {
@@ -568,6 +737,13 @@
                         addHighlightFromInput();
                         e.preventDefault();
                     }
+                });
+
+                highlightInput.addEventListener('input', () => {
+                    if (highlightPreviewTimeout) clearTimeout(highlightPreviewTimeout);
+                    highlightPreviewTimeout = setTimeout(() => {
+                        applyDraftHighlightsFromInput();
+                    }, 120);
                 });
             }
 
@@ -1055,10 +1231,18 @@
         function addHighlightFromInput() {
             const input = document.getElementById('highlight-input');
             if (!input) return;
-            addHighlight(input.value);
+            const terms = parseHighlightTerms(input.value);
+            if (terms.length === 0) return;
+            terms.forEach((term) => addHighlight(term, { clearInput: false, saveState: false }));
+            input.value = '';
+            renderHighlightPreviewBadges([]);
+            applyHighlights();
+            debounceSaveViewState();
         }
 
-        function addHighlight(term) {
+        function addHighlight(term, options = {}) {
+            const clearInput = options.clearInput !== false;
+            const saveState = options.saveState !== false;
             if (!term) return;
             const clean = term.trim();
             if (!clean) return;
@@ -1069,8 +1253,73 @@
             renderHighlightBadges();
             applyHighlights();
             const input = document.getElementById('highlight-input');
-            if (input) input.value = '';
-            debounceSaveViewState();
+            if (input && clearInput) input.value = '';
+            if (saveState) debounceSaveViewState();
+        }
+
+        function parseHighlightTerms(rawValue) {
+            if (!rawValue) return [];
+            return rawValue
+                .split(/[;,\n]+/)
+                .map(t => t.trim())
+                .filter(Boolean);
+        }
+
+        function getDraftTermsWithColors(rawInput) {
+            const draftTerms = parseHighlightTerms(rawInput);
+            const existing = new Set(highlightTerms.map(t => t.term.toLowerCase()));
+            const assignedThisRound = new Map();
+            let nextColorIndex = highlightColorCursor;
+
+            return draftTerms
+                .filter((term, idx) => draftTerms.findIndex(t => t.toLowerCase() === term.toLowerCase()) === idx)
+                .filter(term => !existing.has(term.toLowerCase()))
+                .map(term => {
+                    const lower = term.toLowerCase();
+                    if (highlightColorMap[lower]) {
+                        return { term, color: highlightColorMap[lower] };
+                    }
+                    if (!assignedThisRound.has(lower)) {
+                        assignedThisRound.set(lower, highlightPalette[nextColorIndex % highlightPalette.length]);
+                        nextColorIndex++;
+                    }
+                    return { term, color: assignedThisRound.get(lower) };
+                });
+        }
+
+        function renderHighlightPreviewBadges(previewTerms) {
+            const container = document.getElementById('highlight-preview-container');
+            if (!container) return;
+            container.innerHTML = '';
+
+            previewTerms.forEach(({ term, color }) => {
+                const badge = document.createElement('span');
+                badge.className = 'highlight-preview-badge';
+
+                const swatch = document.createElement('span');
+                swatch.className = 'swatch';
+                swatch.style.backgroundColor = color;
+
+                const label = document.createElement('span');
+                label.textContent = term;
+
+                badge.appendChild(swatch);
+                badge.appendChild(label);
+                container.appendChild(badge);
+            });
+        }
+
+        function applyDraftHighlightsFromInput() {
+            const input = document.getElementById('highlight-input');
+            if (!input) return;
+            const previewTerms = getDraftTermsWithColors(input.value);
+            renderHighlightPreviewBadges(previewTerms);
+            if (previewTerms.length === 0) {
+                applyHighlights();
+                return;
+            }
+
+            applyHighlights(previewTerms);
         }
 
         function removeHighlight(term) {
@@ -1087,6 +1336,20 @@
             highlightTerms = [];
             highlightColorMap = {};
             highlightColorCursor = 0;
+            renderHighlightPreviewBadges([]);
+            renderHighlightBadges();
+            applyHighlights();
+            debounceSaveViewState();
+        }
+
+        function updateHighlightColor(term, color) {
+            if (!term || !color) return;
+            const lower = term.toLowerCase();
+            const idx = highlightTerms.findIndex(t => t.term.toLowerCase() === lower);
+            if (idx === -1) return;
+
+            highlightTerms[idx].color = color;
+            highlightColorMap[lower] = color;
             renderHighlightBadges();
             applyHighlights();
             debounceSaveViewState();
@@ -1106,6 +1369,18 @@
                 swatch.className = 'swatch';
                 swatch.style.backgroundColor = color;
 
+                const swatchInput = document.createElement('input');
+                swatchInput.type = 'color';
+                swatchInput.value = color;
+                swatchInput.className = 'swatch-input';
+                swatchInput.title = 'Change highlight color';
+                swatchInput.setAttribute('aria-label', `Change color for ${term}`);
+                swatchInput.oninput = (e) => {
+                    e.stopPropagation();
+                    updateHighlightColor(term, e.target.value);
+                };
+                swatchInput.onclick = (e) => e.stopPropagation();
+
                 const label = document.createElement('span');
                 label.textContent = term;
 
@@ -1116,17 +1391,24 @@
                     e.stopPropagation();
                     removeHighlight(term);
                 };
-                badge.appendChild(swatch);
+                badge.appendChild(swatchInput);
                 badge.appendChild(label);
                 badge.appendChild(remove);
                 container.appendChild(badge);
             });
         }
 
-        function applyHighlights() {
+        function applyHighlights(extraTerms = []) {
             const container = document.getElementById('logs-container');
             const entries = container.getElementsByClassName('log-entry');
-            const normalized = highlightTerms.map(t => ({ lower: t.term.toLowerCase(), color: t.color }));
+            const mergedTerms = [...highlightTerms];
+            extraTerms.forEach((item) => {
+                const lower = item.term.toLowerCase();
+                if (!mergedTerms.some(t => t.term.toLowerCase() === lower)) {
+                    mergedTerms.push(item);
+                }
+            });
+            const normalized = mergedTerms.map(t => ({ lower: t.term.toLowerCase(), color: t.color }));
             for (let entry of entries) {
                 entry.classList.remove('highlight-match');
                 entry.style.removeProperty('--highlight-color');
@@ -1153,12 +1435,13 @@
             return null;
         }
 
-        function renderLogs(logsToRender, prepend = false, baseIndex = 0) {
+        function renderLogs(logsToRender, prepend = false, baseIndex = 0, animateMode = 'none') {
             const container = document.getElementById('logs-container');
             // Remove 'Loading...' if present
             if (container.textContent === 'Loading...' && logsToRender.length > 0) {
                  container.innerHTML = '';
             }
+            const hasExistingRows = !prepend && container.children.length > 0;
             
             // Use fragment for batch insertion
             const fragment = document.createDocumentFragment();
@@ -1166,6 +1449,13 @@
             logsToRender.forEach((log, index) => {
                 const div = document.createElement('div');
                 div.className = 'log-entry';
+                if (animateMode === 'append' && !prepend && index < 24) {
+                    div.classList.add('entering');
+                    div.style.animationDelay = `${Math.min(index * 12, 220)}ms`;
+                }
+                if (animateMode === 'append' && !prepend && index === 0 && hasExistingRows) {
+                    div.classList.add('append-boundary');
+                }
                 div.logData = log; // Attach data for search
                 const globalIndex = baseIndex + index;
                 div.dataset.index = globalIndex;
@@ -1208,6 +1498,7 @@
                 gutter.title = 'Click to mark/highlight';
                 gutter.onclick = (e) => {
                     e.stopPropagation();
+                    detachFollowMode();
                     div.classList.toggle('marked-entry');
                     const idx = parseInt(div.dataset.index);
                     if (div.classList.contains('marked-entry')) {
@@ -1242,6 +1533,9 @@
                    if (selection.toString().length > 0) {
                        return;
                    }
+
+                   // User interaction with an entry means detach follow until they return to follow zone.
+                   detachFollowMode();
 
                    if (clickTimeout) clearTimeout(clickTimeout);
                    clickTimeout = setTimeout(() => {

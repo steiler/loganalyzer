@@ -31,7 +31,7 @@
 ### 3. Filtering and Navigation
 *   **Datastore Filtering:** A dropdown allows filtering logs by `datastore-name`.
 *   **Time Jump:** Users can jump to a specific timestamp (supporting `HH:MM:SS` and `H:MM` formats). The system locates the nearest log entry and updates the view.
-*   **Jump to Latest:** A dedicated control jumps directly to the newest log entries in the current datastore-filtered view and scrolls to the latest row.
+*   **Jump to Latest:** A dedicated control jumps directly to the newest log entries in the current datastore-filtered view, scrolls to the latest visible row (not past the intentional tail buffer), and explicitly re-enables follow mode.
 *   **Bidirectional Infinite Scrolling:** The frontend supports scrolling both down (to load newer logs) and up (to load older logs). When jumping to a specific time, previous logs are pre-fetched to allow immediate upward scrolling.
 *   **Server-Side Search:** Search queries are executed on the backend, which scans all log lines against the query (case-insensitive substring matching) and returns global match indices relative to the filtered dataset. This enables searching across logs not yet loaded on the frontend.
 *   **Search Navigation with Gap-Filling:**
@@ -46,6 +46,9 @@
 
 *   **Client-Side Highlights (Multi-Term):**
     *   Users can add multiple highlight terms via double-click, the selection shortcut, or a dedicated input + Add button; highlights do not alter the server-side search state.
+    *   While typing in the highlight input, matching rows are highlighted immediately as a live preview; pressing Add/Enter persists the typed terms as badges.
+    *   A pending preview strip shows the color swatch that each newly typed term will receive, so color assignment is visible before committing.
+    *   Existing highlight term colors are editable via each badge's color picker, with immediate row tint updates and persisted state.
     *   Each term gets a color-coded badge with a swatch and remove control; clear-all resets both terms and color assignments.
     *   Matching rows tint with the term's color (via CSS variables) while keeping server-side search navigation intact.
 *   **Help / Usage Modal:** A dedicated Help button opens a modal documenting supported keyboard shortcuts and usage patterns; `?` opens help when not typing in an input.
@@ -57,6 +60,9 @@
 *   **Modal Search:** In-modal search with next/prev navigation, match counters, and highlighting. Enter/Shift+Enter navigate matches.
 *   **Collapse/Expand:** Modal content supports collapsing and expanding nested objects and arrays via gutter +/- buttons for easier navigation of large structures.
 *   **Horizontal Scroll:** The modal preserves long-line formatting and enables horizontal scrolling for overflow content to avoid line wrapping and clipping.
+*   **Subtle Update Transitions:** Live update rendering uses low-distraction animations (gentle append fade-in and short refresh dimming) to make incoming changes perceptible without jarring flicker.
+*   **New-Row Flash Cue:** Newly appended rows get a very light gray background overlay that slowly fades out to help users identify what was just added.
+*   **Append Boundary Cue:** The separator line between existing content and the first newly appended row temporarily thickens (3x) and fades back to regular thickness, clarifying update boundaries.
 
 ## Technical Stack
 
@@ -129,8 +135,11 @@
 *   **Frontend Integration:** The frontend implements continuous background polling (5-second interval matching backend) and provides smart scroll-aware user experience:
     *   **Continuous Background Polling:** Polls `/api/logs` every 5 seconds regardless of scroll position to detect new entries in real-time
     *   **Scroll-Position-Aware Behavior:** When new logs detected, UI automatically decides next action based on user's current position:
-        *   **At Bottom (within 500px):** Auto-loads new entries silently and appends without disrupting scroll position
-        *   **Scrolled Away:** Shows "N new logs available - Click to load" indicator in fixed bottom-right position
+        *   **Following Near End:** Auto-loads new entries and keeps the viewport pinned to the latest rows.
+        *   **Detached/Scrolled Away:** Auto-appends up to one pagination chunk (`limit`) without changing viewport position, then pauses additional auto-append and shows queued count; additional loading resumes via normal scroll-driven pagination.
+    *   **Implicit Follow/Detach:** Follow mode is active near the last log entry; scrolling upward while following, manual scroll-away, or clicking log rows detaches follow and queues updates, while returning to the lower end zone reattaches follow automatically.
+    *   **Spacer-Aware Follow Zone:** With the bottom spacer enabled, follow remains active only in the lower half of that spacer, preventing continued auto-follow when scrolled farther upward within blank space.
+    *   **Consistent End Positioning:** Manual scroll-to-end and the Latest button now use the same end-of-log anchor behavior with a small bottom spacer, avoiding excessive blank space and reducing ambiguity about whether the final row is visible.
     *   **Smart Indicator:** Auto-dismisses after 2 seconds with smooth fade animation; clicking it jumps to bottom, clears view, loads latest batch (recent `initialLimit` entries), and allows natural upward pagination
     *   **Seamless Integration:** All existing features (search, jump-to-time, filters, highlights, pagination) work transparently with dynamically growing log counts from follow mode
 *   **Status:** Fully implemented backend (5-second polling, offset-based reads, mutex protection, rotation handling) with intelligent frontend polling decoupled from scroll events and smooth UX for seamless real-time log following.
