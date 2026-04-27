@@ -44,6 +44,8 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +15,7 @@ import (
 	"time"
 
 	sdcpb "github.com/sdcio/sdc-protos/sdcpb"
+	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
@@ -28,9 +28,13 @@ type LogMeta struct {
 }
 
 var (
+	version = "dev"
+	commit  = "none"
+
 	rawLines    []string
 	metaData    []LogMeta
 	logFile     string
+	port        int
 	stateFile   string
 	followMode  bool
 	logMutex    sync.RWMutex
@@ -52,35 +56,90 @@ type ViewState struct {
 }
 
 func main() {
-	flag.StringVar(&logFile, "file", "", "Path to the log file")
-	flag.BoolVar(&followMode, "follow", false, "Follow log file for new entries (like tail -f)")
-	flag.Parse()
-
-	if logFile == "" {
-		if len(os.Args) > 1 {
-			if os.Args[1][0] != '-' {
-				logFile = os.Args[1]
-			}
-		}
-	}
-
-	if logFile == "" {
-		log.Fatal("Please provide a log file via -file flag or as argument")
-	}
-
-	stateFile = filepath.Join(filepath.Dir(logFile), filepath.Base(logFile)+".viewstate.json")
-
-	// Pre-load file
-	if err := loadFile(logFile); err != nil {
+	if err := newRootCmd().Execute(); err != nil {
 		log.Fatal(err)
 	}
+}
 
-	// Start follow mode if enabled
+func newRootCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "loganalyzer [log-file]",
+		Short: "Analyze structured logs in a browser",
+		Long:  "Log Analyzer runs a local web server for browsing structured JSON logs.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServe(args)
+		},
+	}
+
+	cmd.PersistentFlags().StringVar(&logFile, "file", "", "Path to the log file")
+	cmd.PersistentFlags().BoolVar(&followMode, "follow", false, "Follow log file for new entries (like tail -f)")
+	cmd.PersistentFlags().IntVar(&port, "port", 8080, "HTTP server port")
+
+	serveCmd := &cobra.Command{
+		Use:   "serve [log-file]",
+		Short: "Start the log analyzer web server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServe(args)
+		},
+	}
+
+	versionCmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(buildVersionString())
+		},
+	}
+
+	cmd.AddCommand(serveCmd, versionCmd)
+	return cmd
+}
+
+func runServe(args []string) error {
+	selectedLogFile, err := resolveLogFile(args)
+	if err != nil {
+		return err
+	}
+
+	logFile = selectedLogFile
+	stateFile = filepath.Join(filepath.Dir(logFile), filepath.Base(logFile)+".viewstate.json")
+
+	if err := loadFile(logFile); err != nil {
+		return err
+	}
+
 	if followMode {
 		go followLogFile(logFile)
 		fmt.Println("Follow mode enabled - polling for new log entries every 5 seconds")
 	}
 
+	registerHandlers()
+
+	addr := fmt.Sprintf(":%d", port)
+	fmt.Printf("Starting server on %s with log file: %s (%d lines)\n", addr, logFile, len(rawLines))
+	return http.ListenAndServe(addr, nil)
+}
+
+func resolveLogFile(args []string) (string, error) {
+	if len(args) > 1 {
+		return "", fmt.Errorf("expected at most one log-file argument, got %d", len(args))
+	}
+
+	if len(args) == 1 {
+		if logFile != "" && logFile != args[0] {
+			return "", fmt.Errorf("both --file and positional log-file provided with different values")
+		}
+		return args[0], nil
+	}
+
+	if logFile != "" {
+		return logFile, nil
+	}
+
+	return "", fmt.Errorf("please provide a log file via --file flag or as argument")
+}
+
+func registerHandlers() {
 	// Register API handlers first (more specific routes)
 	http.HandleFunc("/api/logs", handleLogs)
 	http.HandleFunc("/api/offset", handleFindOffset)
@@ -92,9 +151,10 @@ func main() {
 
 	// Register file server last (catch-all)
 	http.Handle("/", http.FileServer(http.Dir("./static")))
+}
 
-	fmt.Printf("Starting server on :8080 with log file: %s (%d lines)\n", logFile, len(rawLines))
-	log.Fatal(http.ListenAndServe(":8080", nil))
+func buildVersionString() string {
+	return fmt.Sprintf("loganalyzer version %s (commit %s)", version, commit)
 }
 
 func followLogFile(path string) {

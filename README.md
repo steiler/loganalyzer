@@ -53,28 +53,37 @@ sudo install -m 0755 loganalyzer /usr/local/bin/loganalyzer
 ### Basic Command
 
 ```bash
-loganalyzer -file <path-to-log-file>
+loganalyzer serve <path-to-log-file>
+```
+
+You can also run the default root command without `serve`:
+
+```bash
+loganalyzer <path-to-log-file>
 ```
 
 ### Options
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-file` | (required) | Path to the log file to analyze |
-| `-port` | `8080` | HTTP server port |
-| `-follow` | `false` | Enable real-time log tailing (polls every 5 seconds) |
+| `--file` | (required unless positional arg used) | Path to the log file to analyze |
+| `--port` | `8080` | HTTP server port |
+| `--follow` | `false` | Enable real-time log tailing (polls every 5 seconds) |
 
 ### Examples
 
 ```bash
 # Basic usage – open log file
-loganalyzer -file app.log
+loganalyzer app.log
 
 # Listen on custom port
-loganalyzer -file app.log -port 3000
+loganalyzer serve app.log --port 3000
 
 # Follow live log file (e.g., for streaming logs)
-loganalyzer -file app.log -follow
+loganalyzer --file app.log --follow
+
+# Print build version info
+loganalyzer version
 ```
 
 Then open your browser to `http://localhost:8080`.

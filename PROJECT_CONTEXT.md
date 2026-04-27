@@ -74,7 +74,7 @@
         *   `/api/decode`: Single value decoding (legacy).
         *   `/api/decode/batch`: Batch decoding of multiple values.
         *   `/api/datastores`: List available datastores.
-    *   **Dependencies:** `github.com/sdcio/sdc-protos` (for `sdcpb` decoding), `google.golang.org/protobuf`.
+    *   **Dependencies:** `github.com/spf13/cobra` (CLI commands and flags), `github.com/sdcio/sdc-protos` (for `sdcpb` decoding), `google.golang.org/protobuf`.
 *   **Frontend:** Vanilla HTML, CSS, JavaScript (no external framework dependencies).
 *   **Transport:** REST / JSON.
 
@@ -159,6 +159,7 @@
 *   **Copy Fidelity:** Modal copy outputs the formatted, indented view that matches the on-screen presentation rather than raw JSON.
 *   **Keyboard Navigation:** ESC key intelligently closes modal or clears search depending on context; Enter/Shift+Enter navigate overview search results or modal search results.
 *   **Keyboard Shortcut Discoverability:** Added Help/Usage modal with shortcut table (overview and modal search navigation, highlight shortcuts, and ESC behavior), accessible via toolbar Help button and `?`.
+*   **Cobra CLI + Version Output:** CLI parsing now uses Cobra with `serve` and `version` commands; build metadata is injected via ldflags (`main.version`, `main.commit`) and printed by `loganalyzer version`.
 *   **Multi-Platform Releases:** GoReleaser configuration (`goreleaser.yaml`) enables automated builds and releases for Windows 64-bit, Linux (amd64 and arm64), and macOS (amd64 and arm64) with appropriate archive formats (.zip for Windows, .tar.gz for others).
 *   **View State Persistence:** View state is automatically saved to a `.viewstate.json` file adjacent to the log file (e.g., `sample.log.viewstate.json`), persisting highlights with colors, manually marked rows (tracked by global log index), scroll position (first visible entry index), and datastore filter. Changes trigger debounced saves with 1-second delay during normal interaction, while page close/tab switch use the Beacon API for reliable immediate saves. On reload, all state is restored including first visible log position and all manual annotations.
 *   **Real-Time Tailing with Offset-Based Efficiency:** Backend now supports optional follow mode via `-follow` flag. New lines are appended to in-memory slices under `sync.RWMutex` protection. Polling interval is 5 seconds with offset-based reads (no re-reading of entire file), and automatic recovery from file rotation/truncation.
