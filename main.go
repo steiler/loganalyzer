@@ -110,7 +110,7 @@ func followLogFile(path string) {
 
 		info, err := file.Stat()
 		if err != nil {
-			file.Close()
+			_ = file.Close()
 			log.Printf("Error stating log file: %v", err)
 			continue
 		}
@@ -121,7 +121,7 @@ func followLogFile(path string) {
 		if currentSize < lastOffset {
 			log.Println("Log file truncated or rotated, reloading from start")
 			logMutex.Lock()
-			file.Close()
+			_ = file.Close()
 			if err := loadFile(path); err != nil {
 				log.Printf("Error reloading file: %v", err)
 			}
@@ -132,13 +132,13 @@ func followLogFile(path string) {
 
 		// No new data
 		if currentSize == lastOffset {
-			file.Close()
+			_ = file.Close()
 			continue
 		}
 
 		// Seek to last known position
 		if _, err := file.Seek(lastOffset, io.SeekStart); err != nil {
-			file.Close()
+			_ = file.Close()
 			log.Printf("Error seeking in log file: %v", err)
 			continue
 		}
@@ -183,7 +183,7 @@ func followLogFile(path string) {
 		}
 
 		lastOffset = currentPos
-		file.Close()
+		_ = file.Close()
 
 		if len(newLines) > 0 {
 			logMutex.Lock()
@@ -204,7 +204,7 @@ func loadFile(path string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	reader := bufio.NewReader(file)
 
@@ -268,10 +268,10 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	datastore := r.URL.Query().Get("datastore")
 
 	if o := r.URL.Query().Get("offset"); o != "" {
-		fmt.Sscanf(o, "%d", &offset)
+		_, _ = fmt.Sscanf(o, "%d", &offset)
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
+		_, _ = fmt.Sscanf(l, "%d", &limit)
 	}
 
 	filteredIndices := make([]int, 0)
@@ -283,11 +283,13 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 
 	if offset >= len(filteredIndices) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"logs":       make([]LogLine, 0),
 			"total":      len(filteredIndices),
 			"generation": generation,
-		})
+		}); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
 		return
 	}
 
@@ -309,11 +311,13 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"logs":       logs,
 		"total":      len(filteredIndices),
 		"generation": generation,
-	})
+	}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func handleFindOffset(w http.ResponseWriter, r *http.Request) {
@@ -348,9 +352,11 @@ func handleFindOffset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"offset": foundIdx,
-	})
+	}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -362,10 +368,12 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	if query == "" {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		if err := json.NewEncoder(w).Encode(map[string]interface{}{
 			"matches": make([]int, 0),
 			"total":   0,
-		})
+		}); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
 		return
 	}
 
@@ -386,10 +394,12 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"matches": matches,
 		"total":   len(matches),
-	})
+	}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func handleDatastores(w http.ResponseWriter, r *http.Request) {
@@ -409,7 +419,9 @@ func handleDatastores(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(list)
+	if err := json.NewEncoder(w).Encode(list); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func handleViewState(w http.ResponseWriter, r *http.Request) {
@@ -422,7 +434,9 @@ func handleViewState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to load view state: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(state)
+		if err := json.NewEncoder(w).Encode(state); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
 	case http.MethodPost:
 		var st ViewState
 		// Handle both application/json and beacon requests
@@ -437,7 +451,9 @@ func handleViewState(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Failed to save view state: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+			log.Printf("Error encoding response: %v", err)
+		}
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -491,9 +507,11 @@ func handleDecode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"decoded": decoded,
-	})
+	}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
@@ -516,9 +534,11 @@ func handleDecodeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"decoded": results,
-	})
+	}); err != nil {
+		log.Printf("Error encoding response: %v", err)
+	}
 }
 
 func decodeTypedValue(encodedVal string) (interface{}, error) {
