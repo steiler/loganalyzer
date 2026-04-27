@@ -143,6 +143,28 @@ Then open your browser to `http://localhost:8080`.
 - **Search** – Find text within the current entry
 - **Horizontal Scroll** – Scroll long lines without wrapping
 
+## Screenshot Walkthrough (Meta View)
+
+### 1) Overview Workspace
+
+![Overview workspace](docs/img/overview.png)
+
+What this view shows from a meta perspective:
+- **Operational control surface** – The top toolbar is where operators switch context quickly (datastore filter, jump-to-time, latest, search, and navigation).
+- **Layered analysis model** – Search and highlight badges are separate systems: search finds navigation targets, while highlights encode analyst intent across many rows.
+- **High-density timeline scanning** – The main list is optimized for throughput: many rows visible at once, minimal wrapping, and fast visual comparison across repeated transaction patterns.
+- **Progressive attention cues** – Row tinting, highlight chips, and scannable left-gutter signals help identify candidate events before opening details.
+
+### 2) Detail Modal Inspection
+
+![Detail modal inspection](docs/img/treedetails.png)
+
+What this view shows from a meta perspective:
+- **Focused single-event forensics** – The modal isolates one log entry so inspection can shift from timeline navigation to deep structural understanding.
+- **Readable nested state** – Indentation, syntax coloring, and collapsible structure make large trees interpretable without losing hierarchy.
+- **Audit-friendly extraction** – The copy action preserves formatted content so findings can be shared in reviews, tickets, or incident notes.
+- **Two-level workflow** – The tool is designed for fast overview triage first, then precise modal drill-down when a row indicates a likely root cause.
+
 ## Architecture
 
 ### Backend (Go)
