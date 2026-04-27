@@ -1449,9 +1449,9 @@
             logsToRender.forEach((log, index) => {
                 const div = document.createElement('div');
                 div.className = 'log-entry';
-                if (animateMode === 'append' && !prepend && index < 24) {
+                if (animateMode === 'append' && !prepend) {
                     div.classList.add('entering');
-                    div.style.animationDelay = `${Math.min(index * 12, 220)}ms`;
+                    div.style.animationDelay = `${Math.min(index * 4, 80)}ms`;
                 }
                 if (animateMode === 'append' && !prepend && index === 0 && hasExistingRows) {
                     div.classList.add('append-boundary');
