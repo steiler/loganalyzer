@@ -86,6 +86,28 @@ loganalyzer --file app.log --follow
 loganalyzer version
 ```
 
+### Analyze a Running data-server Instance (Kubernetes)
+
+You can stream `data-server` logs from Kubernetes into a local file and analyze them live with Log Analyzer.
+
+```bash
+# Terminal 1: stream all current+new logs into a local file
+kubectl logs -n sdc-system statefulsets/data-server-controller data-server -f > data-server.log
+
+# Terminal 2: analyze the same file in follow mode
+loganalyzer --file data-server.log --follow
+```
+
+For long-running instances, start from a recent window instead of the full log history:
+
+```bash
+# Terminal 1: stream last 50 lines, then continue following
+kubectl logs -n sdc-system statefulsets/data-server-controller data-server --tail 50 -f > data-server.log
+
+# Terminal 2: analyze live updates
+loganalyzer --file data-server.log --follow
+```
+
 Then open your browser to `http://localhost:8080`.
 
 ## Keyboard Shortcuts
