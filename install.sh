@@ -19,14 +19,16 @@ need_cmd mktemp
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
+asset_os=""
 
 case "${os}" in
   linux)
     os="linux"
+    asset_os="Linux"
     ;;
   darwin)
-    echo "Error: no macOS release artifacts are configured yet for ${REPO}." >&2
-    exit 1
+    os="darwin"
+    asset_os="Darwin"
     ;;
   *)
     echo "Error: unsupported OS '${os}'" >&2
@@ -59,7 +61,7 @@ fi
 asset_url="$(printf '%s\n' "${latest_json}" \
   | grep -Eo '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]+"' \
   | cut -d '"' -f4 \
-  | grep -E "/${BINARY_NAME}_[^/]*_${os}_${arch}\\.(tar\\.gz|zip)$" \
+  | grep -E "/${BINARY_NAME}_[^/]*_${asset_os}_${arch}\\.(tar\\.gz|zip)$" \
   | head -n1)"
 
 if [[ -z "${asset_url}" ]]; then
