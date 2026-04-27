@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -26,6 +28,9 @@ type LogMeta struct {
 	DatastoreName string `json:"datastore-name"`
 	Time          string `json:"time"`
 }
+
+//go:embed static/*
+var embeddedStatic embed.FS
 
 var (
 	version = "dev"
@@ -149,8 +154,12 @@ func registerHandlers() {
 	http.HandleFunc("/api/datastores", handleDatastores)
 	http.HandleFunc("/api/viewstate", handleViewState)
 
-	// Register file server last (catch-all)
-	http.Handle("/", http.FileServer(http.Dir("./static")))
+	// Register file server last (catch-all) from embedded assets.
+	staticFS, err := fs.Sub(embeddedStatic, "static")
+	if err != nil {
+		log.Fatalf("failed to initialize embedded static assets: %v", err)
+	}
+	http.Handle("/", http.FileServer(http.FS(staticFS)))
 }
 
 func buildVersionString() string {

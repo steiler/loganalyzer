@@ -98,6 +98,7 @@
 *   **Corruption Handling:** The file loader explicitly skips the first line relative to the file reader to prevent `bufio.Scanner: token too long` errors or JSON parse errors caused by log rotation or truncation.
 *   **Recursive Parsing:** The frontend attempts to parse nested JSON strings but fails gracefully (leaving the string as-is) if parsing fails.
 *   **Route Registration Order:** API handlers are registered before the catch-all file server to ensure `/api/*` requests reach their handlers instead of being intercepted by the static file server.
+*   **Embedded Frontend Assets:** The `static/` UI assets (including `index.html`) are embedded into the Go binary using `go:embed`, so GitHub release artifacts remain self-contained and do not depend on shipping a separate `static` directory.
 *   **Empty Result Handling:** The backend initializes result slices as empty arrays (`make([]LogLine, 0)`) rather than nil to ensure JSON encoding produces `[]` instead of `null`, preventing frontend errors when no logs match a query.
 
 ### 3. Decoding Strategy
